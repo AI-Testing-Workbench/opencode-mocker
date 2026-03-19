@@ -1,0 +1,8 @@
+{
+  "apiEndpoint": "http://localhost:3100/v1/messages",
+  "model": "claude-3-sonnet-20240229",
+  "apiKey": "mock-api-key-not-required",
+  "maxTokens": 4096,
+  "temperature": 0.7,
+  "description": "Mock LLM Server 配置示例 - 用于测试 opencode 稳定性"
+}
