@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mock LLM Server — 控制面板</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 { font-size: 16px; font-weight: 600; color: #f0f6fc; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #3fb950; }
+
+    .layout { display: flex; flex: 1; overflow: hidden; }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: 300px;
+      min-width: 260px;
+      background: #161b22;
+      border-right: 1px solid #30363d;
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+    }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: #8b949e;
+      margin-bottom: 6px;
+    }
+
+    .mode-card {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .mode-card select {
+      width: 100%;
+      background: #161b22;
+      border: 1px solid #30363d;
+      color: #c9d1d9;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      outline: none;
+    }
+    .mode-card select:focus { border-color: #58a6ff; }
+
+    .config-panel {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 14px;
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .config-panel.active { display: flex; }
+
+    label { font-size: 12px; color: #8b949e; display: block; margin-bottom: 4px; }
+
+    input[type="number"], input[type="text"], textarea {
+      width: 100%;
+      background: #161b22;
+      border: 1px solid #30363d;
+      color: #c9d1d9;
+      padding: 7px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      outline: none;
+      font-family: inherit;
+    }
+    input:focus, textarea:focus { border-color: #58a6ff; }
+    textarea { resize: vertical; min-height: 70px; }
+
+    .hint { font-size: 11px; color: #6e7681; }
+
+    .apply-btn {
+      background: #238636;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .apply-btn:hover { background: #2ea043; }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      padding: 3px 8px;
+      border-radius: 12px;
+      font-weight: 600;
+    }
+    .badge-scenario { background: #3fb95033; color: #3fb950; }
+    .badge-echo     { background: #58a6ff33; color: #58a6ff; }
+    .badge-fixed    { background: #58a6ff33; color: #58a6ff; }
+    .badge-delay    { background: #d2992233; color: #d29922; }
+    .badge-bigdata  { background: #58a6ff33; color: #58a6ff; }
+    .badge-error    { background: #f8514933; color: #f85149; }
+    .badge-longrun  { background: #bc8cff33; color: #bc8cff; }
+
+    .current-mode {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+    }
+    .current-mode .label { font-size: 12px; color: #8b949e; }
+
+    /* ── Log area ── */
+    .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+    .log-header {
+      padding: 12px 20px;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #161b22;
+    }
+    .log-header span { font-size: 13px; color: #8b949e; }
+
+    .clear-btn {
+      background: transparent;
+      border: 1px solid #30363d;
+      color: #8b949e;
+      padding: 4px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .clear-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+
+    .log-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .log-item {
+      background: #161b22;
+      border: 1px solid #21262d;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: border-color .15s;
+    }
+    .log-item:hover { border-color: #30363d; }
+    .log-item.selected { border-color: #58a6ff; }
+
+    .log-item-header {
+      padding: 10px 14px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .log-time     { color: #6e7681; white-space: nowrap; min-width: 52px; }
+    .log-endpoint { color: #8b949e; white-space: nowrap; }
+    .log-preview  { color: #c9d1d9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+
+    .empty-state {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #6e7681;
+      font-size: 13px;
+    }
+
+    #detailView {
+      border-bottom: 1px solid #30363d;
+      background: #0d1117;
+      max-height: 45vh;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+    .detail-inner {
+      padding: 14px 20px;
+    }
+    .detail-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .detail-toolbar span { font-size: 13px; font-weight: 600; color: #f0f6fc; }
+    .detail-close {
+      background: transparent;
+      border: 1px solid #30363d;
+      color: #8b949e;
+      padding: 3px 10px;
+      border-radius: 5px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .detail-close:hover { border-color: #f85149; color: #f85149; }
+    .detail-meta { font-size: 11px; color: #6e7681; margin-bottom: 10px; }
+    .detail-section-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: #6e7681;
+      margin: 10px 0 4px;
+    }
+    .detail-pre {
+      background: #161b22;
+      border: 1px solid #21262d;
+      border-radius: 4px;
+      padding: 10px 12px;
+      font-size: 11px;
+      color: #c9d1d9;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.6;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .msg-block { margin-bottom: 8px; }
+    .msg-role {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 4px;
+      margin-bottom: 3px;
+    }
+    .role-system    { background: #bc8cff22; color: #bc8cff; }
+    .role-user      { background: #3fb95022; color: #3fb950; }
+    .role-assistant { background: #58a6ff22; color: #58a6ff; }
+    .role-tool      { background: #d2992222; color: #d29922; }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #238636;
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: all .25s;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="dot"></div>
+  <h1>Mock LLM Server — 控制面板</h1>
+</header>
+
+<div class="layout">
+
+  <aside class="sidebar">
+
+    <div>
+      <div class="section-title">当前模式</div>
+      <div class="current-mode">
+        <span class="label">激活场景</span>
+        <span class="status-badge badge-scenario" id="currentBadge">Scenario</span>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">场景选择</div>
+      <div class="mode-card">
+        <select id="modeSelect" onchange="onModeChange()">
+          <option value="scenario">Scenario — 多轮对话场景</option>
+          <option value="echo">Echo — 回显用户输入</option>
+          <option value="fixed">Fixed — 固定回复</option>
+          <option value="delay">Delay — 延迟响应</option>
+          <option value="bigdata">Big Data — 大数据响应</option>
+          <option value="error">Error — 返回错误</option>
+          <option value="longrun">Long Run — 持续运行</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- fixed config -->
+    <div class="config-panel" id="cfg-fixed">
+      <div class="section-title">固定回复配置</div>
+      <div>
+        <label>回复内容</label>
+        <textarea id="fixedReply">This is a mock response.</textarea>
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
+    <!-- delay config -->
+    <div class="config-panel" id="cfg-delay">
+      <div class="section-title">延迟配置</div>
+      <div>
+        <label>延迟时间 (ms)</label>
+        <input type="number" id="delayMs" value="2000" min="0" max="60000" step="100" />
+        <div class="hint">范围：0 ~ 60000 ms</div>
+      </div>
+      <div>
+        <label>延迟后的回复内容</label>
+        <textarea id="delayReply">This is a mock response.</textarea>
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
+    <!-- bigdata config -->
+    <div class="config-panel" id="cfg-bigdata">
+      <div class="section-title">大数据配置</div>
+      <div>
+        <label>响应大小 (MB)</label>
+        <input type="number" id="bigdataMB" value="1" min="0.1" max="5" step="0.1" />
+        <div class="hint">范围：0.1 ~ 5 MB</div>
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
+    <!-- error config -->
+    <div class="config-panel" id="cfg-error">
+      <div class="section-title">错误配置</div>
+      <div>
+        <label>HTTP 状态码</label>
+        <input type="number" id="errorCode" value="500" min="400" max="599" step="1" />
+      </div>
+      <div>
+        <label>错误信息</label>
+        <input type="text" id="errorMsg" value="Internal Server Error" />
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
+    <!-- longrun config -->
+    <div class="config-panel" id="cfg-longrun">
+      <div class="section-title">持续运行配置</div>
+      <div>
+        <label>持续时长 (小时)</label>
+        <input type="number" id="longrunHours" value="1" min="0.1" max="24" step="0.1" />
+        <div class="hint">范围：0.1 ~ 24 小时</div>
+      </div>
+      <div>
+        <label>发送间隔 (ms)</label>
+        <input type="number" id="longrunInterval" value="5000" min="500" max="30000" step="500" />
+        <div class="hint">范围：500 ~ 30000 ms</div>
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
+  </aside>
+
+  <main class="main">
+    <div class="log-header">
+      <span id="logCount">请求日志 (0)</span>
+      <button class="clear-btn" onclick="clearLogs()">清空日志</button>
+    </div>
+    <!-- 详情面板：独立区域，不随日志列表刷新 -->
+    <div id="detailView" style="display:none;"></div>
+    <div class="log-list" id="logList">
+      <div class="empty-state" id="emptyState">暂无请求记录</div>
+    </div>
+  </main>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const BADGE = {
+    scenario: { cls: 'badge-scenario', text: 'Scenario' },
+    echo:     { cls: 'badge-echo',     text: 'Echo'     },
+    fixed:    { cls: 'badge-fixed',    text: 'Fixed'    },
+    delay:    { cls: 'badge-delay',    text: 'Delay'    },
+    bigdata:  { cls: 'badge-bigdata',  text: 'Big Data' },
+    error:    { cls: 'badge-error',    text: 'Error'    },
+    longrun:  { cls: 'badge-longrun',  text: 'Long Run' },
+  };
+
+  // modes that have no config panel and apply immediately on select
+  const INSTANT_MODES = new Set(['scenario', 'echo']);
+
+  let logs = [];
+  let selectedKey = null; // 当前展开的日志 timestamp
+
+  function onModeChange() {
+    const mode = document.getElementById('modeSelect').value;
+    // show/hide config panels
+    ['fixed','delay','bigdata','error','longrun'].forEach(m => {
+      document.getElementById(`cfg-${m}`).classList.toggle('active', m === mode);
+    });
+    // instant modes apply immediately
+    if (INSTANT_MODES.has(mode)) applyModeOnly(mode);
+  }
+
+  async function applyModeOnly(mode) {
+    try {
+      await fetch('/api/scenario', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode })
+      });
+      updateBadge(mode);
+      showToast(`✅ 已切换为 ${BADGE[mode].text}`);
+    } catch {
+      showToast('❌ 切换失败', true);
+    }
+  }
+
+  async function applyConfig() {
+    const mode = document.getElementById('modeSelect').value;
+    const body = { mode };
+
+    if (mode === 'fixed') {
+      body.fixedReply = document.getElementById('fixedReply').value;
+    } else if (mode === 'delay') {
+      body.delayMs    = parseInt(document.getElementById('delayMs').value) || 2000;
+      body.fixedReply = document.getElementById('delayReply').value;
+    } else if (mode === 'bigdata') {
+      body.sizeMB = parseFloat(document.getElementById('bigdataMB').value) || 1;
+    } else if (mode === 'error') {
+      body.statusCode = parseInt(document.getElementById('errorCode').value) || 500;
+      body.message    = document.getElementById('errorMsg').value || 'Internal Server Error';
+    } else if (mode === 'longrun') {
+      body.longrunHours      = parseFloat(document.getElementById('longrunHours').value) || 1;
+      body.longrunIntervalMs = parseInt(document.getElementById('longrunInterval').value) || 5000;
+    }
+
+    try {
+      const res = await fetch('/api/scenario', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error();
+      updateBadge(mode);
+      showToast('✅ 场景已应用');
+    } catch {
+      showToast('❌ 应用失败', true);
+    }
+  }
+
+  function updateBadge(mode) {
+    const badge = document.getElementById('currentBadge');
+    badge.className = `status-badge ${BADGE[mode]?.cls || 'badge-scenario'}`;
+    badge.textContent = BADGE[mode]?.text || mode;
+  }
+
+  // ── Logs ──
+  async function fetchLogs() {
+    try {
+      const res = await fetch('/logs');
+      const data = await res.json();
+      logs = data.logs || [];
+      renderLogs();
+    } catch {}
+  }
+
+  function renderLogs() {
+    const list = document.getElementById('logList');
+    const empty = document.getElementById('emptyState');
+    document.getElementById('logCount').textContent = `请求日志 (${logs.length})`;
+    [...list.querySelectorAll('.log-item')].forEach(el => el.remove());
+
+    if (logs.length === 0) { empty.style.display = 'flex'; return; }
+    empty.style.display = 'none';
+
+    [...logs].reverse().forEach(log => {
+      const item = document.createElement('div');
+      item.className = 'log-item' + (log.timestamp === selectedKey ? ' selected' : '');
+
+      const time = new Date(log.timestamp);
+      const hms  = `${pad(time.getHours())}:${pad(time.getMinutes())}:${pad(time.getSeconds())}`;
+      const mode = log.scenario || 'scenario';
+      const bi   = BADGE[mode] || BADGE.scenario;
+      const msgs = log.request?.messages || [];
+      const lastNonSystem = [...msgs].reverse().find(m => m.role !== 'system');
+      const previewRaw = typeof lastNonSystem?.content === 'string'
+        ? lastNonSystem.content
+        : JSON.stringify(lastNonSystem?.content || '');
+
+      item.innerHTML = `
+        <div class="log-item-header">
+          <span class="log-time">${hms}</span>
+          <span class="status-badge ${bi.cls}" style="font-size:11px;padding:2px 6px">${bi.text}</span>
+          <span class="log-endpoint">${log.endpoint}</span>
+          <span class="log-preview">${escHtml(previewRaw.substring(0, 100))}</span>
+        </div>
+      `;
+
+      item.addEventListener('click', () => {
+        // 取消其他选中
+        [...list.querySelectorAll('.log-item.selected')].forEach(el => el.classList.remove('selected'));
+        if (selectedKey === log.timestamp) {
+          // 再次点击同一条：关闭详情
+          selectedKey = null;
+          document.getElementById('detailView').style.display = 'none';
+        } else {
+          selectedKey = log.timestamp;
+          item.classList.add('selected');
+          showDetail(log);
+        }
+      });
+
+      list.appendChild(item);
+    });
+  }
+
+  function showDetail(log) {
+    const dv = document.getElementById('detailView');
+    dv.style.display = 'block';
+    const msgs = log.request?.messages || [];
+    const systemMsg = msgs.find(m => m.role === 'system');
+    const time = new Date(log.timestamp);
+    const hms  = `${pad(time.getHours())}:${pad(time.getMinutes())}:${pad(time.getSeconds())}`;
+
+    let systemHtml = '';
+    if (systemMsg) {
+      const txt = typeof systemMsg.content === 'string' ? systemMsg.content : JSON.stringify(systemMsg.content);
+      systemHtml = `
+        <div class="detail-section-label">System Prompt</div>
+        <div class="detail-pre">${escHtml(txt)}</div>
+      `;
+    }
+
+    let msgsHtml = '';
+    if (msgs.length) {
+      const roleClass = r => ['system','user','assistant','tool'].includes(r) ? `role-${r}` : 'role-user';
+      msgsHtml = `<div class="detail-section-label">Messages (${msgs.length})</div>` +
+        msgs.map(m => {
+          const txt = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+          return `<div class="msg-block">
+            <span class="msg-role ${roleClass(m.role)}">${m.role}</span>
+            <div class="detail-pre">${escHtml(txt.substring(0, 600))}${txt.length > 600 ? '\n…' : ''}</div>
+          </div>`;
+        }).join('');
+    }
+
+    dv.innerHTML = `
+      <div class="detail-inner">
+        <div class="detail-toolbar">
+          <span>请求详情</span>
+          <button class="detail-close" onclick="closeDetail()">✕ 关闭</button>
+        </div>
+        <div class="detail-meta">${hms} · ${log.endpoint} · ${log.scenario || 'scenario'}</div>
+        ${systemHtml}
+        ${msgsHtml}
+      </div>
+    `;
+  }
+
+  function closeDetail() {
+    selectedKey = null;
+    document.getElementById('detailView').style.display = 'none';
+    const list = document.getElementById('logList');
+    [...list.querySelectorAll('.log-item.selected')].forEach(el => el.classList.remove('selected'));
+  }
+
+  async function clearLogs() {
+    await fetch('/logs/clear', { method: 'POST' });
+    logs = [];
+    closeDetail();
+    renderLogs();
+    showToast('🗑️ 日志已清空');
+  }
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+  function showToast(msg, isErr = false) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.style.background = isErr ? '#da3633' : '#238636';
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2200);
+  }
+
+  async function init() {
+    try {
+      const res = await fetch('/api/scenario');
+      const data = await res.json();
+      const mode = data.mode || 'scenario';
+      document.getElementById('modeSelect').value = mode;
+      onModeChange();
+      updateBadge(mode);
+      if (data.fixedReply)        document.getElementById('fixedReply').value      = data.fixedReply;
+      if (data.fixedReply)        document.getElementById('delayReply').value       = data.fixedReply;
+      if (data.delayMs)           document.getElementById('delayMs').value          = data.delayMs;
+      if (data.sizeMB)            document.getElementById('bigdataMB').value        = data.sizeMB;
+      if (data.statusCode)        document.getElementById('errorCode').value        = data.statusCode;
+      if (data.message)           document.getElementById('errorMsg').value         = data.message;
+      if (data.longrunHours)      document.getElementById('longrunHours').value     = data.longrunHours;
+      if (data.longrunIntervalMs) document.getElementById('longrunInterval').value  = data.longrunIntervalMs;
+    } catch {}
+    await fetchLogs();
+    setInterval(fetchLogs, 3000);
+  }
+
+  init();
+</script>
+</body>
+</html>

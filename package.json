@@ -10,13 +10,19 @@
     "test:openai": "node test-openai-format.js",
     "test:stream": "node test-stream.js"
   },
-  "keywords": ["mock", "llm", "api", "testing"],
+  "keywords": [
+    "mock",
+    "llm",
+    "api",
+    "testing"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
     "body-parser": "^1.20.2",
-    "node-fetch": "^2.7.0"
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "node-fetch": "^2.7.0",
+    "uuid": "^14.0.0"
   }
 }
