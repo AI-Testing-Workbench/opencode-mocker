@@ -7,7 +7,7 @@ const { v4: uuidv4 } = require('uuid');
 
 // ── 场景状态（内存） ──
 let scenarioConfig = {
-  mode: 'scenario', // 'scenario' | 'echo' | 'fixed' | 'delay' | 'bigdata' | 'error' | 'longrun'
+  mode: 'scenario', // 'scenario' | 'echo' | 'fixed' | 'delay' | 'bigdata' | 'error' | 'longrun' | 'reset' | 'hang' | 'stream-error' | 'tool-hang'
   fixedReply: 'This is a mock response.',
   delayMs: 2000,
   sizeMB: 1,
@@ -15,6 +15,11 @@ let scenarioConfig = {
   message: 'Internal Server Error',
   longrunHours: 1,
   longrunIntervalMs: 5000,
+  // 网络异常场景参数
+  resetAfterBytes: 1024, // reset 场景：发送多少字节后断开
+  hangAfterChunks: 3,    // hang 场景：发送多少个 chunk 后挂起
+  streamErrorAfterMs: 500, // stream-error 场景：多少毫秒后抛出错误
+  toolHangPartial: 0.5,  // tool-hang 场景：工具参数发送比例（0-1）
 };
 
 // ── 工具函数 ──
@@ -164,8 +169,10 @@ app.get('/api/scenario', (_req, res) => res.json(scenarioConfig));
 
 app.post('/api/scenario', (req, res) => {
   const { mode, fixedReply, delayMs, sizeMB, statusCode, message,
-          longrunHours, longrunIntervalMs } = req.body;
-  const validModes = ['scenario', 'echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun'];
+          longrunHours, longrunIntervalMs, resetAfterBytes, hangAfterChunks,
+          streamErrorAfterMs, toolHangPartial } = req.body;
+  const validModes = ['scenario', 'echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun',
+                      'reset', 'hang', 'stream-error', 'tool-hang'];
   if (!validModes.includes(mode)) {
     return res.status(400).json({ error: 'Invalid mode' });
   }
@@ -177,6 +184,10 @@ app.post('/api/scenario', (req, res) => {
   if (message           !== undefined) scenarioConfig.message           = String(message);
   if (longrunHours      !== undefined) scenarioConfig.longrunHours      = Math.min(24, Math.max(0.1, parseFloat(longrunHours)));
   if (longrunIntervalMs !== undefined) scenarioConfig.longrunIntervalMs = Math.min(30000, Math.max(500, parseInt(longrunIntervalMs)));
+  if (resetAfterBytes   !== undefined) scenarioConfig.resetAfterBytes   = Math.min(10240, Math.max(100, parseInt(resetAfterBytes)));
+  if (hangAfterChunks   !== undefined) scenarioConfig.hangAfterChunks   = Math.min(20, Math.max(1, parseInt(hangAfterChunks)));
+  if (streamErrorAfterMs !== undefined) scenarioConfig.streamErrorAfterMs = Math.min(10000, Math.max(100, parseInt(streamErrorAfterMs)));
+  if (toolHangPartial   !== undefined) scenarioConfig.toolHangPartial   = Math.min(1, Math.max(0, parseFloat(toolHangPartial)));
   console.log(`\n🎭 Scenario changed: ${JSON.stringify(scenarioConfig)}`);
   res.json({ ok: true, config: scenarioConfig });
 });
@@ -287,6 +298,152 @@ async function scenarioMiddleware(req, res, next) {
     console.log(`  📌 Fixed mode`);
     if (isStream) return sendStream(res, fixedReply, model);
     return res.json(buildMessage(fixedReply, model));
+  }
+
+  // ── reset：连接重置（模拟 TypeError: terminated） ──
+  if (mode === 'reset') {
+    const { resetAfterBytes } = scenarioConfig;
+    console.log(`  🔌 Reset mode: will disconnect after ${resetAfterBytes} bytes`);
+    
+    const id = `chatcmpl-${uuidv4()}`;
+    const created = Math.floor(Date.now() / 1000);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // 发送角色
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+    
+    // 发送部分内容
+    let bytesSent = 0;
+    const content = 'This is a partial response that will be interrupted by connection reset. ';
+    const words = content.split(' ');
+    
+    for (const word of words) {
+      const chunk = `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: word + ' ' }, finish_reason: null }] })}\n\n`;
+      bytesSent += Buffer.byteLength(chunk, 'utf8');
+      res.write(chunk);
+      
+      if (bytesSent >= resetAfterBytes) {
+        console.log(`  ❌ Destroying connection after ${bytesSent} bytes`);
+        await sleep(50); // 让客户端接收到部分数据
+        res.destroy(new Error('connection reset'));
+        return;
+      }
+      await sleep(20);
+    }
+    
+    // 如果没有达到阈值，正常结束
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+    res.write('data: [DONE]\n\n');
+    return res.end();
+  }
+
+  // ── hang：流挂起（不发送 [DONE]） ──
+  if (mode === 'hang') {
+    const { hangAfterChunks } = scenarioConfig;
+    console.log(`  ⏸️  Hang mode: will hang after ${hangAfterChunks} chunks`);
+    
+    const id = `chatcmpl-${uuidv4()}`;
+    const created = Math.floor(Date.now() / 1000);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // 发送角色
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+    
+    // 发送指定数量的 chunks
+    for (let i = 0; i < hangAfterChunks; i++) {
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: `Chunk ${i + 1}... ` }, finish_reason: null }] })}\n\n`);
+      await sleep(50);
+    }
+    
+    console.log(`  ⏳ Connection hanging (no [DONE] marker will be sent)`);
+    // 不发送 [DONE]，也不关闭连接
+    // 连接会一直保持打开状态，直到客户端超时
+    return;
+  }
+
+  // ── stream-error：流传输错误 ──
+  if (mode === 'stream-error') {
+    const { streamErrorAfterMs } = scenarioConfig;
+    console.log(`  💥 Stream error mode: will error after ${streamErrorAfterMs}ms`);
+    
+    const id = `chatcmpl-${uuidv4()}`;
+    const created = Math.floor(Date.now() / 1000);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // 发送角色
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+    
+    // 发送部分内容
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: 'Partial response before error...' }, finish_reason: null }] })}\n\n`);
+    
+    // 等待指定时间后抛出错误
+    await sleep(streamErrorAfterMs);
+    console.log(`  ❌ Destroying stream with error`);
+    res.destroy(new Error('Stream transmission failed'));
+    return;
+  }
+
+  // ── tool-hang：工具调用挂起 ──
+  if (mode === 'tool-hang') {
+    const { toolHangPartial } = scenarioConfig;
+    console.log(`  🔧 Tool hang mode: will send ${toolHangPartial * 100}% of tool arguments`);
+    
+    const id = `chatcmpl-${uuidv4()}`;
+    const created = Math.floor(Date.now() / 1000);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // 发送角色
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+    
+    // 发送工具调用开始
+    const toolCallId = 'call_' + uuidv4().substring(0, 8);
+    res.write(`data: ${JSON.stringify({ 
+      id, object: 'chat.completion.chunk', created, model, 
+      choices: [{ 
+        index: 0, 
+        delta: { 
+          tool_calls: [{ 
+            index: 0, 
+            id: toolCallId, 
+            type: 'function', 
+            function: { name: 'read_file', arguments: '' } 
+          }] 
+        }, 
+        finish_reason: null 
+      }] 
+    })}\n\n`);
+    
+    // 发送部分参数
+    const fullArgs = JSON.stringify({ path: '/test/file.txt', encoding: 'utf-8' });
+    const partialLength = Math.floor(fullArgs.length * toolHangPartial);
+    const partialArgs = fullArgs.substring(0, partialLength);
+    
+    res.write(`data: ${JSON.stringify({ 
+      id, object: 'chat.completion.chunk', created, model, 
+      choices: [{ 
+        index: 0, 
+        delta: { 
+          tool_calls: [{ 
+            index: 0, 
+            function: { arguments: partialArgs } 
+          }] 
+        }, 
+        finish_reason: null 
+      }] 
+    })}\n\n`);
+    
+    await sleep(100);
+    console.log(`  ⏳ Tool call hanging (incomplete arguments: "${partialArgs}")`);
+    // 不发送完整参数，也不发送 [DONE]
+    return;
   }
 
   return res.status(400).json({ error: `Unknown mode: ${mode}` });

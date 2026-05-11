@@ -121,13 +121,17 @@
       border-radius: 12px;
       font-weight: 600;
     }
-    .badge-scenario { background: #3fb95033; color: #3fb950; }
-    .badge-echo     { background: #58a6ff33; color: #58a6ff; }
-    .badge-fixed    { background: #58a6ff33; color: #58a6ff; }
-    .badge-delay    { background: #d2992233; color: #d29922; }
-    .badge-bigdata  { background: #58a6ff33; color: #58a6ff; }
-    .badge-error    { background: #f8514933; color: #f85149; }
-    .badge-longrun  { background: #bc8cff33; color: #bc8cff; }
+    .badge-scenario     { background: #3fb95033; color: #3fb950; }
+    .badge-echo         { background: #58a6ff33; color: #58a6ff; }
+    .badge-fixed        { background: #58a6ff33; color: #58a6ff; }
+    .badge-delay        { background: #d2992233; color: #d29922; }
+    .badge-bigdata      { background: #58a6ff33; color: #58a6ff; }
+    .badge-error        { background: #f8514933; color: #f85149; }
+    .badge-longrun      { background: #bc8cff33; color: #bc8cff; }
+    .badge-reset        { background: #f8514933; color: #f85149; }
+    .badge-hang         { background: #d2992233; color: #d29922; }
+    .badge-stream-error { background: #f8514933; color: #f85149; }
+    .badge-tool-hang    { background: #d2992233; color: #d29922; }
 
     .current-mode {
       display: flex;
@@ -314,6 +318,12 @@
           <option value="bigdata">Big Data — 大数据响应</option>
           <option value="error">Error — 返回错误</option>
           <option value="longrun">Long Run — 持续运行</option>
+          <optgroup label="网络异常场景">
+            <option value="reset">Reset — 连接重置 ⭐</option>
+            <option value="hang">Hang — 流挂起</option>
+            <option value="stream-error">Stream Error — 流传输错误</option>
+            <option value="tool-hang">Tool Hang — 工具调用挂起</option>
+          </optgroup>
         </select>
       </div>
     </div>
@@ -384,6 +394,66 @@
       <button class="apply-btn" onclick="applyConfig()">应用</button>
     </div>
 
+    <!-- reset config -->
+    <div class="config-panel" id="cfg-reset">
+      <div class="section-title">连接重置配置 ⭐</div>
+      <div>
+        <label>发送字节数后断开</label>
+        <input type="number" id="resetAfterBytes" value="1024" min="100" max="10240" step="100" />
+        <div class="hint">范围：100 ~ 10240 字节</div>
+      </div>
+      <div class="hint" style="margin-top: 8px; padding: 8px; background: #161b22; border-radius: 4px;">
+        ⚠️ 模拟 <code style="color: #f85149;">TypeError: terminated</code> 错误<br/>
+        服务器会发送部分数据后立即断开连接
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
+    <!-- hang config -->
+    <div class="config-panel" id="cfg-hang">
+      <div class="section-title">流挂起配置</div>
+      <div>
+        <label>发送 chunk 数量后挂起</label>
+        <input type="number" id="hangAfterChunks" value="3" min="1" max="20" step="1" />
+        <div class="hint">范围：1 ~ 20 个 chunks</div>
+      </div>
+      <div class="hint" style="margin-top: 8px; padding: 8px; background: #161b22; border-radius: 4px;">
+        ⏸️ 发送部分数据后不发送 [DONE] 标记<br/>
+        连接保持打开，客户端会等待直到超时
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
+    <!-- stream-error config -->
+    <div class="config-panel" id="cfg-stream-error">
+      <div class="section-title">流传输错误配置</div>
+      <div>
+        <label>延迟时间后抛出错误 (ms)</label>
+        <input type="number" id="streamErrorAfterMs" value="500" min="100" max="10000" step="100" />
+        <div class="hint">范围：100 ~ 10000 ms</div>
+      </div>
+      <div class="hint" style="margin-top: 8px; padding: 8px; background: #161b22; border-radius: 4px;">
+        💥 响应头成功返回，但读取响应体时失败<br/>
+        适合测试流读取错误处理
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
+    <!-- tool-hang config -->
+    <div class="config-panel" id="cfg-tool-hang">
+      <div class="section-title">工具调用挂起配置</div>
+      <div>
+        <label>工具参数发送比例</label>
+        <input type="number" id="toolHangPartial" value="0.5" min="0" max="1" step="0.1" />
+        <div class="hint">范围：0 ~ 1 (0.5 = 50%)</div>
+      </div>
+      <div class="hint" style="margin-top: 8px; padding: 8px; background: #161b22; border-radius: 4px;">
+        🔧 发送部分工具调用参数后挂起<br/>
+        适合测试工具执行的错误恢复
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
   </aside>
 
   <main class="main">
@@ -404,13 +474,17 @@
 
 <script>
   const BADGE = {
-    scenario: { cls: 'badge-scenario', text: 'Scenario' },
-    echo:     { cls: 'badge-echo',     text: 'Echo'     },
-    fixed:    { cls: 'badge-fixed',    text: 'Fixed'    },
-    delay:    { cls: 'badge-delay',    text: 'Delay'    },
-    bigdata:  { cls: 'badge-bigdata',  text: 'Big Data' },
-    error:    { cls: 'badge-error',    text: 'Error'    },
-    longrun:  { cls: 'badge-longrun',  text: 'Long Run' },
+    scenario:      { cls: 'badge-scenario',      text: 'Scenario'      },
+    echo:          { cls: 'badge-echo',          text: 'Echo'          },
+    fixed:         { cls: 'badge-fixed',         text: 'Fixed'         },
+    delay:         { cls: 'badge-delay',         text: 'Delay'         },
+    bigdata:       { cls: 'badge-bigdata',       text: 'Big Data'      },
+    error:         { cls: 'badge-error',         text: 'Error'         },
+    longrun:       { cls: 'badge-longrun',       text: 'Long Run'      },
+    reset:         { cls: 'badge-reset',         text: 'Reset ⭐'      },
+    hang:          { cls: 'badge-hang',          text: 'Hang'          },
+    'stream-error': { cls: 'badge-stream-error', text: 'Stream Error'  },
+    'tool-hang':   { cls: 'badge-tool-hang',     text: 'Tool Hang'     },
   };
 
   // modes that have no config panel and apply immediately on select
@@ -422,7 +496,7 @@
   function onModeChange() {
     const mode = document.getElementById('modeSelect').value;
     // show/hide config panels
-    ['fixed','delay','bigdata','error','longrun'].forEach(m => {
+    ['fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang'].forEach(m => {
       document.getElementById(`cfg-${m}`).classList.toggle('active', m === mode);
     });
     // instant modes apply immediately
@@ -460,6 +534,14 @@
     } else if (mode === 'longrun') {
       body.longrunHours      = parseFloat(document.getElementById('longrunHours').value) || 1;
       body.longrunIntervalMs = parseInt(document.getElementById('longrunInterval').value) || 5000;
+    } else if (mode === 'reset') {
+      body.resetAfterBytes = parseInt(document.getElementById('resetAfterBytes').value) || 1024;
+    } else if (mode === 'hang') {
+      body.hangAfterChunks = parseInt(document.getElementById('hangAfterChunks').value) || 3;
+    } else if (mode === 'stream-error') {
+      body.streamErrorAfterMs = parseInt(document.getElementById('streamErrorAfterMs').value) || 500;
+    } else if (mode === 'tool-hang') {
+      body.toolHangPartial = parseFloat(document.getElementById('toolHangPartial').value) || 0.5;
     }
 
     try {
@@ -620,14 +702,18 @@
       document.getElementById('modeSelect').value = mode;
       onModeChange();
       updateBadge(mode);
-      if (data.fixedReply)        document.getElementById('fixedReply').value      = data.fixedReply;
-      if (data.fixedReply)        document.getElementById('delayReply').value       = data.fixedReply;
-      if (data.delayMs)           document.getElementById('delayMs').value          = data.delayMs;
-      if (data.sizeMB)            document.getElementById('bigdataMB').value        = data.sizeMB;
-      if (data.statusCode)        document.getElementById('errorCode').value        = data.statusCode;
-      if (data.message)           document.getElementById('errorMsg').value         = data.message;
-      if (data.longrunHours)      document.getElementById('longrunHours').value     = data.longrunHours;
-      if (data.longrunIntervalMs) document.getElementById('longrunInterval').value  = data.longrunIntervalMs;
+      if (data.fixedReply)         document.getElementById('fixedReply').value         = data.fixedReply;
+      if (data.fixedReply)         document.getElementById('delayReply').value         = data.fixedReply;
+      if (data.delayMs)            document.getElementById('delayMs').value            = data.delayMs;
+      if (data.sizeMB)             document.getElementById('bigdataMB').value          = data.sizeMB;
+      if (data.statusCode)         document.getElementById('errorCode').value          = data.statusCode;
+      if (data.message)            document.getElementById('errorMsg').value           = data.message;
+      if (data.longrunHours)       document.getElementById('longrunHours').value       = data.longrunHours;
+      if (data.longrunIntervalMs)  document.getElementById('longrunInterval').value    = data.longrunIntervalMs;
+      if (data.resetAfterBytes)    document.getElementById('resetAfterBytes').value    = data.resetAfterBytes;
+      if (data.hangAfterChunks)    document.getElementById('hangAfterChunks').value    = data.hangAfterChunks;
+      if (data.streamErrorAfterMs) document.getElementById('streamErrorAfterMs').value = data.streamErrorAfterMs;
+      if (data.toolHangPartial)    document.getElementById('toolHangPartial').value    = data.toolHangPartial;
     } catch {}
     await fetchLogs();
     setInterval(fetchLogs, 3000);

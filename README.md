@@ -13,6 +13,7 @@
 - 📊 会话管理和请求计数
 - 🌐 CORS 支持
 - ⏱️ 适合长时间稳定性测试（17+ 轮交互）
+- 🔌 **网络异常场景**：模拟连接重置、流挂起、传输错误等（新增）
 
 ## 快速开始
 
@@ -246,6 +247,173 @@ const codeResponses = {
 - 每个请求的序号
 - 用户消息内容（前100个字符）
 - 当前响应的场景步骤
+
+## 环境变量
+
+- `PORT`: 服务端口（默认 3100）
+
+## 场景模式
+
+服务支持多种测试场景，可通过 Web 控制面板（`http://localhost:3100`）或 API 切换：
+
+### 基础场景
+
+1. **scenario** - 多轮对话场景（默认）
+   - 模拟完整的项目搭建流程
+   - 17+ 轮交互，包含工具调用和思考过程
+
+2. **echo** - 回显模式
+   - 返回用户输入的内容
+   - 适合测试基本连接
+
+3. **fixed** - 固定回复
+   - 返回预设的固定内容
+   - 可自定义回复文本
+
+4. **delay** - 延迟响应
+   - 在指定延迟后返回响应
+   - 可配置延迟时间（0-60000ms）
+
+5. **bigdata** - 大数据响应
+   - 返回大量数据（0.1-5MB）
+   - 测试大数据处理能力
+
+6. **error** - 错误响应
+   - 返回 HTTP 错误状态码
+   - 可配置状态码和错误信息
+
+7. **longrun** - 持续运行
+   - 持续发送流式数据（最长24小时）
+   - 适合长时间稳定性测试
+
+### 网络异常场景 🆕
+
+这些场景用于模拟各种网络异常情况，帮助测试错误处理和恢复机制：
+
+#### 1. **reset** - 连接重置 ⭐ 推荐
+
+**模拟错误**：`TypeError: terminated at Fetch.onAborted`
+
+**行为**：
+- 发送部分 SSE 数据
+- 在达到指定字节数后立即销毁连接
+- 客户端会收到连接重置错误
+
+**配置参数**：
+- `resetAfterBytes`: 发送多少字节后断开（100-10240，默认 1024）
+
+**使用场景**：
+- 测试网络中断处理
+- 验证连接重置恢复机制
+- 复现 `TypeError: terminated` 错误
+
+**示例**：
+\`\`\`bash
+curl -X POST http://localhost:3100/api/scenario \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"reset","resetAfterBytes":1024}'
+\`\`\`
+
+#### 2. **hang** - 流挂起
+
+**模拟错误**：超时 / `AbortError`
+
+**行为**：
+- 发送指定数量的数据块
+- 不发送 `[DONE]` 标记
+- 连接保持打开状态
+- 客户端会等待直到超时
+
+**配置参数**：
+- `hangAfterChunks`: 发送多少个 chunk 后挂起（1-20，默认 3）
+
+**使用场景**：
+- 测试超时处理逻辑
+- 验证 AbortController 机制
+- 测试长时间等待的行为
+
+**示例**：
+\`\`\`bash
+curl -X POST http://localhost:3100/api/scenario \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"hang","hangAfterChunks":3}'
+\`\`\`
+
+#### 3. **stream-error** - 流传输错误
+
+**模拟错误**：流读取错误
+
+**行为**：
+- 响应头成功返回（200 OK）
+- 发送部分数据
+- 在指定时间后销毁流
+- 读取响应体时失败
+
+**配置参数**：
+- `streamErrorAfterMs`: 多少毫秒后抛出错误（100-10000，默认 500）
+
+**使用场景**：
+- 测试流读取错误处理
+- 验证部分数据接收后的恢复
+- 测试流中断的边界情况
+
+**示例**：
+\`\`\`bash
+curl -X POST http://localhost:3100/api/scenario \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"stream-error","streamErrorAfterMs":500}'
+\`\`\`
+
+#### 4. **tool-hang** - 工具调用挂起
+
+**模拟错误**：工具执行错误
+
+**行为**：
+- 发送工具调用开始
+- 发送部分工具参数（可配置比例）
+- 连接挂起，参数不完整
+- 不发送 `[DONE]` 标记
+
+**配置参数**：
+- `toolHangPartial`: 工具参数发送比例（0-1，默认 0.5 = 50%）
+
+**使用场景**：
+- 测试工具调用的错误恢复
+- 验证不完整参数的处理
+- 测试工具执行超时
+
+**示例**：
+\`\`\`bash
+curl -X POST http://localhost:3100/api/scenario \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"tool-hang","toolHangPartial":0.5}'
+\`\`\`
+
+### 场景切换 API
+
+**获取当前场景**：
+\`\`\`bash
+curl http://localhost:3100/api/scenario
+\`\`\`
+
+**切换场景**：
+\`\`\`bash
+curl -X POST http://localhost:3100/api/scenario \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"reset","resetAfterBytes":1024}'
+\`\`\`
+
+**响应示例**：
+\`\`\`json
+{
+  "ok": true,
+  "config": {
+    "mode": "reset",
+    "resetAfterBytes": 1024,
+    ...
+  }
+}
+\`\`\`
 
 ## 环境变量
 
