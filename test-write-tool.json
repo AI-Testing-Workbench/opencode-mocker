@@ -1,0 +1,127 @@
+{
+  "description": "Write 工具的完整响应示例",
+  "flow": [
+    {
+      "step": 1,
+      "description": "第一次请求：LLM 返回工具调用",
+      "request": {
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "body": {
+          "model": "mock-model",
+          "messages": [
+            {
+              "role": "user",
+              "content": "write hello world to /test/hello.txt"
+            }
+          ],
+          "stream": false
+        }
+      },
+      "response": {
+        "id": "chatcmpl-abc123",
+        "object": "chat.completion",
+        "created": 1234567890,
+        "model": "mock-model",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_write_001",
+                  "type": "function",
+                  "function": {
+                    "name": "write",
+                    "arguments": "{\"filePath\":\"/test/hello.txt\",\"content\":\"Hello, World!\"}"
+                  }
+                }
+              ]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 100,
+          "completion_tokens": 50,
+          "total_tokens": 150
+        }
+      }
+    },
+    {
+      "step": 2,
+      "description": "第二次请求：opencode 发送工具执行结果",
+      "request": {
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "body": {
+          "model": "mock-model",
+          "messages": [
+            {
+              "role": "user",
+              "content": "write hello world to /test/hello.txt"
+            },
+            {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_write_001",
+                  "type": "function",
+                  "function": {
+                    "name": "write",
+                    "arguments": "{\"filePath\":\"/test/hello.txt\",\"content\":\"Hello, World!\"}"
+                  }
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "tool_call_id": "call_write_001",
+              "content": "{\"success\":true,\"path\":\"/test/hello.txt\",\"bytes\":13}"
+            }
+          ],
+          "stream": false
+        }
+      },
+      "response": {
+        "id": "chatcmpl-def456",
+        "object": "chat.completion",
+        "created": 1234567891,
+        "model": "mock-model",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "I've successfully written 'Hello, World!' to /test/hello.txt"
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 150,
+          "completion_tokens": 30,
+          "total_tokens": 180
+        }
+      }
+    }
+  ],
+  "streaming_example": {
+    "description": "流式响应示例（第一次请求）",
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-abc123\",\"object\":\"chat.completion.chunk\",\"created\":1234567890,\"model\":\"mock-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}",
+      "",
+      "data: {\"id\":\"chatcmpl-abc123\",\"object\":\"chat.completion.chunk\",\"created\":1234567890,\"model\":\"mock-model\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_write_001\",\"type\":\"function\",\"function\":{\"name\":\"write\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}",
+      "",
+      "data: {\"id\":\"chatcmpl-abc123\",\"object\":\"chat.completion.chunk\",\"created\":1234567890,\"model\":\"mock-model\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"filePath\\\":\\\"/test/hello.txt\\\",\\\"content\\\":\\\"Hello, World!\\\"}\"}}]},\"finish_reason\":null}]}",
+      "",
+      "data: {\"id\":\"chatcmpl-abc123\",\"object\":\"chat.completion.chunk\",\"created\":1234567890,\"model\":\"mock-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}",
+      "",
+      "data: [DONE]",
+      ""
+    ]
+  }
+}

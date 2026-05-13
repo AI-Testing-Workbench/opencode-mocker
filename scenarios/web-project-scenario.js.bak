@@ -60,28 +60,22 @@ todo-app/
   `正在验证前端文件...`,
 
   // Step 13: 完成总结
-  `✅ 测试完成！
+  `项目创建完成！
 
-项目已创建并清理完毕。
+已创建的文件：
+- backend/package.json
+- backend/server.js
+- backend/routes/todos.js
+- frontend/index.html
+- frontend/style.css
+- frontend/app.js
+- README.md
 
-本轮测试执行的操作：
-1. ✅ 创建后端目录结构
-2. ✅ 创建 backend/package.json
-3. ✅ 创建 backend/server.js
-4. ✅ 创建 backend/routes/todos.js
-5. ✅ 创建前端目录结构
-6. ✅ 创建 frontend/index.html
-7. ✅ 创建 frontend/style.css
-8. ✅ 创建 frontend/app.js
-9. ✅ 创建 README.md
-10. ✅ 验证后端文件
-11. ✅ 验证前端文件
-12. ✅ 清理测试文件
+运行步骤：
+1. cd backend && npm install && npm start
+2. 在浏览器打开 frontend/index.html
 
-测试循环已完成。如需再次测试，请发送新的消息。`,
-
-  // Step 14: 清理文件
-  `正在清理测试文件...`
+项目已准备就绪，可以开始使用了！`
 ];
 
 // 每一步的具体操作内容（包含思考和工具调用）
@@ -116,7 +110,7 @@ const stepActions = {
         function: {
           name: "write",
           arguments: JSON.stringify({
-            filePath: "backend/package.json",
+            path: "backend/package.json",
             content: `{
   "name": "todo-backend",
   "version": "1.0.0",
@@ -148,7 +142,7 @@ const stepActions = {
         function: {
           name: "write",
           arguments: JSON.stringify({
-            filePath: "backend/server.js",
+            path: "backend/server.js",
             content: `const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
@@ -186,7 +180,7 @@ app.listen(PORT, () => {
         function: {
           name: "write",
           arguments: JSON.stringify({
-            filePath: "backend/routes/todos.js",
+            path: "backend/routes/todos.js",
             content: `const express = require('express');
 const router = express.Router();
 
@@ -271,7 +265,7 @@ module.exports = router;`
         function: {
           name: "write",
           arguments: JSON.stringify({
-            filePath: "frontend/index.html",
+            path: "frontend/index.html",
             content: `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -317,7 +311,7 @@ module.exports = router;`
         function: {
           name: "write",
           arguments: JSON.stringify({
-            filePath: "frontend/style.css",
+            path: "frontend/style.css",
             content: `* {
     margin: 0;
     padding: 0;
@@ -448,7 +442,7 @@ h1 {
         function: {
           name: "write",
           arguments: JSON.stringify({
-            filePath: "frontend/app.js",
+            path: "frontend/app.js",
             content: `const API_URL = 'http://localhost:3001/api/todos';
 
 let todos = [];
@@ -570,7 +564,7 @@ function updateStats() {
         function: {
           name: "write",
           arguments: JSON.stringify({
-            filePath: "README.md",
+            path: "README.md",
             content: `# 待办事项 Web 应用
 
 一个简单的待办事项管理应用，包含前后端分离架构。
@@ -656,25 +650,6 @@ todo-app/
           arguments: JSON.stringify({
             command: "ls -la frontend",
             description: "列出前端目录文件"
-          })
-        }
-      }
-    ]
-  },
-  
-  12: {
-    description: "清理测试文件",
-    reasoning: "项目创建完成。现在清理所有创建的文件，准备下一轮测试。",
-    action: "正在清理测试文件，准备下一轮...",
-    toolCalls: [
-      {
-        id: "call_cleanup",
-        type: "function",
-        function: {
-          name: "bash",
-          arguments: JSON.stringify({
-            command: "rm -rf backend frontend README.md",
-            description: "清理测试文件"
           })
         }
       }
