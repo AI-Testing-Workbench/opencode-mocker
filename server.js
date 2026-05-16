@@ -426,13 +426,13 @@ app.post('/api/scenario', (req, res) => {
           longrunHours, longrunIntervalMs, resetAfterBytes, hangAfterChunks,
           streamErrorAfterMs, toolHangPartial, loopCount } = req.body;
   const validModes = ['scenario', 'echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun',
-                      'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker'];
+                      'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker', 'thinking-hang'];
   if (!validModes.includes(mode)) {
     return res.status(400).json({ error: 'Invalid mode' });
   }
   scenarioConfig.mode = mode;
   if (fixedReply        !== undefined) scenarioConfig.fixedReply        = String(fixedReply);
-  if (delayMs           !== undefined) scenarioConfig.delayMs           = Math.min(60000, Math.max(0, parseInt(delayMs)));
+  if (delayMs           !== undefined) scenarioConfig.delayMs           = Math.max(0, parseInt(delayMs));
   if (sizeMB            !== undefined) scenarioConfig.sizeMB            = Math.min(5, Math.max(0.1, parseFloat(sizeMB)));
   if (statusCode        !== undefined) scenarioConfig.statusCode        = parseInt(statusCode);
   if (message           !== undefined) scenarioConfig.message           = String(message);
@@ -698,6 +698,30 @@ async function scenarioMiddleware(req, res, next) {
     await sleep(100);
     console.log(`  ⏳ Tool call hanging (incomplete arguments: "${partialArgs}")`);
     // 不发送完整参数，也不发送 [DONE]
+    return;
+  }
+
+  // ── thinking-hang：发送思考内容后挂起 ──
+  if (mode === 'thinking-hang') {
+    console.log(`  🧠 Thinking-hang mode: will send reasoning then hang`);
+    
+    const id = `chatcmpl-${uuidv4()}`;
+    const created = Math.floor(Date.now() / 1000);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // 发送角色
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+    await sleep(100);
+    
+    // 发送思考内容
+    const thinkingContent = fixedReply || '让我思考一下这个问题...\n\n首先，我需要分析用户的需求。\n然后，我会制定一个详细的计划。\n最后，我会逐步执行这个计划。\n\n现在开始执行...';
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { reasoning: thinkingContent }, finish_reason: null }] })}\n\n`);
+    await sleep(200);
+    
+    console.log(`  ⏳ Connection hanging after sending reasoning (no content or [DONE] will be sent)`);
+    // 不发送 content，不发送 [DONE]，连接保持打开状态
     return;
   }
 

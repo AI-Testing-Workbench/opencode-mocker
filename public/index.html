@@ -323,6 +323,7 @@
             <option value="hang">Hang — 流挂起</option>
             <option value="stream-error">Stream Error — 流传输错误</option>
             <option value="tool-hang">Tool Hang — 工具调用挂起</option>
+            <option value="thinking-hang">Thinking Hang — 思考后挂起 🧠</option>
           </optgroup>
           <optgroup label="工具测试">
             <option value="tool-mocker">Tool Mocker — 工具响应模拟 🔧</option>
@@ -468,6 +469,27 @@
       <button class="apply-btn" onclick="applyConfig()">应用</button>
     </div>
 
+    <!-- thinking-hang config -->
+    <div class="config-panel" id="cfg-thinking-hang">
+      <div class="section-title">思考后挂起配置 🧠</div>
+      <div>
+        <label>思考内容（可选）</label>
+        <textarea id="thinkingContent" placeholder="留空使用默认思考内容">让我思考一下这个问题...
+
+首先，我需要分析用户的需求。
+然后，我会制定一个详细的计划。
+最后，我会逐步执行这个计划。
+
+现在开始执行...</textarea>
+      </div>
+      <div class="hint" style="margin-top: 8px; padding: 8px; background: #161b22; border-radius: 4px;">
+        🧠 发送 reasoning（思考内容）后挂起<br/>
+        不发送 content 和 [DONE]，连接保持打开<br/>
+        适合测试客户端处理思考内容后的超时行为
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
     <!-- tool-mocker config -->
     <div class="config-panel" id="cfg-tool-mocker">
       <div class="section-title">工具响应模拟 🔧</div>
@@ -526,6 +548,7 @@
     hang:          { cls: 'badge-hang',          text: 'Hang'          },
     'stream-error': { cls: 'badge-stream-error', text: 'Stream Error'  },
     'tool-hang':   { cls: 'badge-tool-hang',     text: 'Tool Hang'     },
+    'thinking-hang': { cls: 'badge-hang',        text: 'Thinking Hang 🧠' },
     'tool-mocker': { cls: 'badge-scenario',      text: 'Tool Mocker 🔧' },
   };
 
@@ -539,7 +562,7 @@
   function onModeChange() {
     const mode = document.getElementById('modeSelect').value;
     // show/hide config panels
-    ['scenario','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','tool-mocker'].forEach(m => {
+    ['scenario','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','thinking-hang','tool-mocker'].forEach(m => {
       document.getElementById(`cfg-${m}`).classList.toggle('active', m === mode);
     });
     // instant modes apply immediately
@@ -587,6 +610,11 @@
       body.streamErrorAfterMs = parseInt(document.getElementById('streamErrorAfterMs').value) || 500;
     } else if (mode === 'tool-hang') {
       body.toolHangPartial = parseFloat(document.getElementById('toolHangPartial').value) || 0.5;
+    } else if (mode === 'thinking-hang') {
+      const thinkingContent = document.getElementById('thinkingContent').value.trim();
+      if (thinkingContent) {
+        body.fixedReply = thinkingContent;
+      }
     } else if (mode === 'tool-mocker') {
       // Tool mocker mode - just switch mode, config is managed separately
     }
