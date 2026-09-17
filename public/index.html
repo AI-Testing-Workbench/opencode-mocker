@@ -324,6 +324,7 @@
             <option value="stream-error">Stream Error — 流传输错误</option>
             <option value="tool-hang">Tool Hang — 工具调用挂起</option>
             <option value="thinking-hang">Thinking Hang — 思考后挂起 🧠</option>
+            <option value="flaky">Flaky — 前 N 次失败后恢复 🎲（YOLO 错误中断）</option>
           </optgroup>
           <optgroup label="工具测试">
             <option value="tool-mocker">Tool Mocker — 工具响应模拟 🔧</option>
@@ -359,8 +360,8 @@
       <div class="section-title">延迟配置</div>
       <div>
         <label>延迟时间 (ms)</label>
-        <input type="number" id="delayMs" value="2000" min="0" max="60000" step="100" />
-        <div class="hint">范围：0 ~ 60000 ms</div>
+        <input type="number" id="delayMs" value="2000" min="0" max="60000000" step="100" />
+        <div class="hint">范围：0 ~ 60000000 ms</div>
       </div>
       <div>
         <label>延迟后的回复内容</label>
@@ -491,6 +492,44 @@
       <button class="apply-btn" onclick="applyConfig()">应用</button>
     </div>
 
+    <!-- flaky config -->
+    <div class="config-panel" id="cfg-flaky">
+      <div class="section-title">Flaky：前 N 次失败后恢复 🎲</div>
+      <div>
+        <label>失败次数 failTimes</label>
+        <input type="number" id="failTimes" value="2" min="0" max="50" step="1" />
+        <div class="hint">0~50：前 N 次 LLM 调用失败，第 N+1 次起恢复正常。<br/>
+          ≥4 可打满 YOLO 错误自动续跑上限（3 次）观察最终停止</div>
+      </div>
+      <div>
+        <label>失败形态 failKind</label>
+        <select id="failKind">
+          <option value="mid">mid — 吐字后断流（测 emitted 闸门 + 错误续跑）⭐</option>
+          <option value="http">http — 直接返回错误码（测重试层→续跑整链路）</option>
+          <option value="empty">empty — 正常结束但空轮（测 guard 空轮识别）</option>
+          <option value="truncate">truncate — finish=length 截断（测 guard 截断识别）</option>
+        </select>
+      </div>
+      <div>
+        <label>mid 断流前 content chunk 数</label>
+        <input type="number" id="midWords" value="3" min="0" max="20" step="1" />
+        <div class="hint">0 = 首字节前断开（对照：应被重试层透明处理）；&gt;0 = 半截断开（不应重放）</div>
+      </div>
+      <div>
+        <label>恢复后的回复</label>
+        <input type="text" id="recoverReply" value="【mock 已恢复】服务恢复正常。我会从这里继续把任务做完，不需要再确认。" />
+      </div>
+      <div class="hint" style="margin-top: 8px; padding: 8px; background: #161b22; border-radius: 4px;">
+        🎲 预期（YOLO 开启）：<br/>
+        · mid+failTimes=1 → 断流不重放 → 自动续跑 1 次 → 恢复 → 会话正常收尾<br/>
+        · mid+failTimes=4 → 续跑 3 次仍失败 → 最终停止（熔断边界）<br/>
+        · http+failTimes=1 → 首字节前失败 → 进程内自动重试即恢复（透明，无续跑消息）<br/>
+        · empty/truncate → guard 注入 CONTINUE 提醒续跑
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+      <button class="apply-btn" onclick="resetFlaky()" style="margin-top: 4px;">重置计数</button>
+    </div>
+
     <!-- tool-mocker config -->
     <div class="config-panel" id="cfg-tool-mocker">
       <div class="section-title">工具响应模拟 🔧</div>
@@ -550,6 +589,7 @@
     'stream-error': { cls: 'badge-stream-error', text: 'Stream Error'  },
     'tool-hang':   { cls: 'badge-tool-hang',     text: 'Tool Hang'     },
     'thinking-hang': { cls: 'badge-hang',        text: 'Thinking Hang 🧠' },
+    'flaky':         { cls: 'badge-reset',       text: 'Flaky 🎲'      },
     'tool-mocker': { cls: 'badge-scenario',      text: 'Tool Mocker 🔧' },
     'invalid-tool': { cls: 'badge-error',        text: 'Invalid Tool ⚠️' },
   };
@@ -564,9 +604,8 @@
   function onModeChange() {
     const mode = document.getElementById('modeSelect').value;
     // show/hide config panels
-    ['scenario','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','thinking-hang','tool-mocker'].forEach(m => {
-      const panel = document.getElementById(`cfg-${m}`);
-      if (panel) panel.classList.toggle('active', m === mode);
+    ['scenario','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','thinking-hang','flaky','tool-mocker'].forEach(m => {
+      document.getElementById(`cfg-${m}`).classList.toggle('active', m === mode);
     });
     // instant modes apply immediately
     if (INSTANT_MODES.has(mode)) applyModeOnly(mode);
@@ -618,6 +657,12 @@
       if (thinkingContent) {
         body.fixedReply = thinkingContent;
       }
+    } else if (mode === 'flaky') {
+      body.failTimes   = parseInt(document.getElementById('failTimes').value);
+      if (Number.isNaN(body.failTimes)) body.failTimes = 2;
+      body.failKind    = document.getElementById('failKind').value;
+      body.midWords    = parseInt(document.getElementById('midWords').value) || 0;
+      body.recoverReply = document.getElementById('recoverReply').value || undefined;
     } else if (mode === 'tool-mocker') {
       // Tool mocker mode - just switch mode, config is managed separately
     }
@@ -643,6 +688,15 @@
       }
     } catch {
       showToast('❌ 应用失败', true);
+    }
+  }
+
+  async function resetFlaky() {
+    try {
+      await fetch('/api/flaky/reset', { method: 'POST' });
+      showToast('🎲 flaky 计数已重置');
+    } catch {
+      showToast('❌ 重置失败', true);
     }
   }
 

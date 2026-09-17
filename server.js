@@ -9,7 +9,7 @@ const { v4: uuidv4 } = require('uuid');
 let scenarioConfig = {
   mode: 'scenario', // 'scenario' | 'echo' | 'fixed' | 'delay' | 'bigdata' | 'error' | 'longrun' | 'reset' | 'hang' | 'stream-error' | 'tool-hang' | 'tool-mocker'
   fixedReply: 'This is a mock response.',
-  delayMs: 2000,
+  delayMs: 600000,
   sizeMB: 1,
   statusCode: 500,
   message: 'Internal Server Error',
@@ -22,7 +22,15 @@ let scenarioConfig = {
   toolHangPartial: 0.5,  // tool-hang 场景：工具参数发送比例（0-1）
   // 场景循环参数
   loopCount: 10,          // scenario 场景：循环次数
+  // flaky 场景（YOLO 错误/中断恢复专用）：前 failTimes 次 LLM 调用失败，之后恢复正常
+  failTimes: 2,           // 连续失败几次后恢复（默认 2）
+  failKind: 'mid',        // 'mid'=流中途断开(触发 emitted 闸门) | 'http'=HTTP 错误码 | 'empty'=正常结束但空响应 | 'truncate'=finish=length 截断
+  midWords: 3,            // mid 模式：断开前吐出的 content chunk 数（>0 才能命中"已流出内容"判定）
+  recoverReply: '【mock 已恢复】服务恢复正常。我会从这里继续把任务做完，不需要再确认。',
 };
+
+// ── flaky 场景请求计数（内存）：每次进入 flaky 分支 +1，达 failTimes 后恢复 ──
+let flakyHits = 0;
 
 // ── 会话循环跟踪（内存） ──
 const sessionLoops = new Map(); // sessionId -> { current: number, total: number, currentStep: number }
@@ -308,7 +316,12 @@ function getScenarioModule(messages) {
   if (messages && messages.length > 0) {
     const systemMsg = messages.find(m => m.role === 'system');
     if (systemMsg && systemMsg.content) {
-      // 检测 OpenCode 客户端
+      // 检查是否包含 abort test 关键词
+      if (systemMsg.content.includes('abort') || systemMsg.content.toLowerCase().includes('abort test')) {
+        console.log('  🛑 Using abort-test scenario');
+        return require('./scenarios/abort-test-scenario');
+      }
+      // 检查是否是 opencode 客户端
       if (systemMsg.content.includes('opencode')) {
         console.log('  📱 Detected OpenCode client');
         return require('./scenarios/opencode-scenario');
@@ -434,26 +447,14 @@ app.get('/api/scenario', (_req, res) => res.json(scenarioConfig));
 app.post('/api/scenario', (req, res) => {
   const { mode, fixedReply, delayMs, sizeMB, statusCode, message,
           longrunHours, longrunIntervalMs, resetAfterBytes, hangAfterChunks,
-          streamErrorAfterMs, toolHangPartial, loopCount } = req.body;
+          streamErrorAfterMs, toolHangPartial, loopCount,
+          failTimes, failKind, midWords, recoverReply } = req.body;
   const validModes = ['scenario', 'echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun',
-                      'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker', 'thinking-hang', 'invalid-tool'];
+                      'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker', 'thinking-hang', 'flaky'];
   if (!validModes.includes(mode)) {
     return res.status(400).json({ error: 'Invalid mode' });
   }
-  
-  // 如果切换到 invalid-tool 模式，重置所有会话步骤
-  if (mode === 'invalid-tool' && scenarioConfig.mode !== 'invalid-tool') {
-    try {
-      const invalidToolScenario = require('./scenarios/invalid-tool-scenario');
-      if (invalidToolScenario.resetSession) {
-        invalidToolScenario.resetSession(); // 不传 sessionId 则重置所有会话
-        console.log('  🔄 Reset all invalid-tool sessions');
-      }
-    } catch (err) {
-      console.warn('  ⚠️  Failed to reset invalid-tool sessions:', err.message);
-    }
-  }
-  
+  const prevMode = scenarioConfig.mode;
   scenarioConfig.mode = mode;
   if (fixedReply        !== undefined) scenarioConfig.fixedReply        = String(fixedReply);
   if (delayMs           !== undefined) scenarioConfig.delayMs           = Math.max(0, parseInt(delayMs));
@@ -467,8 +468,26 @@ app.post('/api/scenario', (req, res) => {
   if (streamErrorAfterMs !== undefined) scenarioConfig.streamErrorAfterMs = Math.min(10000, Math.max(100, parseInt(streamErrorAfterMs)));
   if (toolHangPartial   !== undefined) scenarioConfig.toolHangPartial   = Math.min(1, Math.max(0, parseFloat(toolHangPartial)));
   if (loopCount         !== undefined) scenarioConfig.loopCount         = Math.min(100, Math.max(1, parseInt(loopCount)));
+  if (failTimes         !== undefined) scenarioConfig.failTimes         = Math.min(50, Math.max(0, parseInt(failTimes)));
+  if (failKind          !== undefined) scenarioConfig.failKind          = ['mid', 'http', 'empty', 'truncate'].includes(failKind) ? failKind : scenarioConfig.failKind;
+  if (midWords          !== undefined) scenarioConfig.midWords          = Math.min(20, Math.max(0, parseInt(midWords)));
+  if (recoverReply      !== undefined) scenarioConfig.recoverReply      = String(recoverReply);
+  // 切到 flaky、或重新设置时，重置请求计数，确保"前 N 次失败"从干净状态开始
+  if (mode === 'flaky') {
+    flakyHits = 0;
+    console.log(`\n🎲 flaky 场景已重置计数 (failTimes=${scenarioConfig.failTimes}, failKind=${scenarioConfig.failKind})`);
+  } else if (prevMode === 'flaky') {
+    flakyHits = 0;
+  }
   console.log(`\n🎭 Scenario changed: ${JSON.stringify(scenarioConfig)}`);
-  res.json({ ok: true, config: scenarioConfig });
+  res.json({ ok: true, config: { ...scenarioConfig, flakyHits } });
+});
+
+// ── flaky 手动重置计数（不切模式） ──
+app.post('/api/flaky/reset', (_req, res) => {
+  flakyHits = 0;
+  console.log('  🎲 flaky 计数已手动重置');
+  res.json({ ok: true, config: { ...scenarioConfig, flakyHits } });
 });
 
 // ── 场景拦截中间件 ──
@@ -490,6 +509,68 @@ async function scenarioMiddleware(req, res, next) {
     return res.status(statusCode).json({
       error: { message, type: 'mock_error', code: statusCode }
     });
+  }
+
+    // ── flaky：前 failTimes 次 LLM 调用失败，之后恢复（YOLO 错误中断自动化测试专用） ──
+    if (mode === 'flaky') {
+      flakyHits += 1;
+      const { failTimes, failKind, midWords, recoverReply } = scenarioConfig;
+      const failing = flakyHits <= failTimes;
+      console.log(`  🎲 Flaky mode [${failKind}] request #${flakyHits}: ${failing ? '❌ 模拟失败' : '✅ 恢复正常'}`);
+
+      // http 形态与流无关：失败窗口内直接回错误码（AI SDK 在首字节前抛 APICallError）
+      if (failing && failKind === 'http') {
+        console.log(`  ❌ Flaky http: ${statusCode} ${scenarioConfig.message}`);
+        return res.status(statusCode).json({
+          error: { message: scenarioConfig.message, type: 'mock_flaky_error', code: statusCode }
+        });
+      }
+
+      // 恢复轮；或空恢复预算（mid/empty/truncate 无法作用于非流式请求）
+      if (!failing || !isStream) {
+        const content = `${recoverReply}（本次为第 ${flakyHits} 次请求）`;
+        if (isStream) return sendStream(res, content, model);
+        return res.json(buildMessage(content, model));
+      }
+
+    const id = `chatcmpl-${uuidv4()}`;
+    const created = Math.floor(Date.now() / 1000);
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    // ── empty：finish=stop 但零 content（测 YOLO guard 的"空轮"识别与 CONTINUE 续跑） ──
+    if (failKind === 'empty') {
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
+
+    // ── truncate：finish_reason=length 的截断输出（测 guard 的"length 截断"识别） ──
+    if (failKind === 'truncate') {
+      const parts = '这段回复会被 token 上限无情截断，任务肯';
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] })}\n\n`);
+      for (const ch of parts) {
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: ch }, finish_reason: null }] })}\n\n`);
+        await sleep(15);
+      }
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'length' }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
+
+    // ── mid（默认）：吐内容后 destroy 连接（测 emitted 闸门拦截重试 + YOLO 错误续跑）。
+    //    midWords=0 则首字节前断开 = 纯传输层瞬断（对照：会被重试层透明重试） ──
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+    for (let i = 0; i < midWords; i++) {
+      const chunk = `data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: `部分输出${i + 1}... ` }, finish_reason: null }] })}\n\n`;
+      res.write(chunk);
+      await sleep(30);
+    }
+    await sleep(80);
+    console.log(`  💥 Flaky mid: 已流出 ${midWords} 个 content chunk，断开连接模拟中断`);
+    return res.destroy(new Error('flaky connection drop'));
   }
 
   // ── longrun：持续 streaming，直到超时 ──
