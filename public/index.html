@@ -327,6 +327,7 @@
           </optgroup>
           <optgroup label="工具测试">
             <option value="tool-mocker">Tool Mocker — 工具响应模拟 🔧</option>
+            <option value="invalid-tool">Invalid Tool — 工具参数验证失败测试 ⚠️</option>
           </optgroup>
         </select>
       </div>
@@ -550,10 +551,11 @@
     'tool-hang':   { cls: 'badge-tool-hang',     text: 'Tool Hang'     },
     'thinking-hang': { cls: 'badge-hang',        text: 'Thinking Hang 🧠' },
     'tool-mocker': { cls: 'badge-scenario',      text: 'Tool Mocker 🔧' },
+    'invalid-tool': { cls: 'badge-error',        text: 'Invalid Tool ⚠️' },
   };
 
   // modes that have no config panel and apply immediately on select
-  const INSTANT_MODES = new Set(['scenario', 'echo']);
+  const INSTANT_MODES = new Set(['scenario', 'echo', 'invalid-tool']);
 
   let logs = [];
   let selectedKey = null; // 当前展开的日志 timestamp
@@ -563,7 +565,8 @@
     const mode = document.getElementById('modeSelect').value;
     // show/hide config panels
     ['scenario','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','thinking-hang','tool-mocker'].forEach(m => {
-      document.getElementById(`cfg-${m}`).classList.toggle('active', m === mode);
+      const panel = document.getElementById(`cfg-${m}`);
+      if (panel) panel.classList.toggle('active', m === mode);
     });
     // instant modes apply immediately
     if (INSTANT_MODES.has(mode)) applyModeOnly(mode);

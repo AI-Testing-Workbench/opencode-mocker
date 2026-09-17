@@ -298,11 +298,21 @@ function randomSentence() {
 
 // ── 多轮对话场景模块选择 ──
 function getScenarioModule(messages) {
+  // 优先检查模式配置
+  if (scenarioConfig.mode === 'invalid-tool') {
+    console.log('  ⚠️  Using invalid-tool test scenario');
+    return require('./scenarios/invalid-tool-scenario');
+  }
+  
+  // 然后检查消息内容
   if (messages && messages.length > 0) {
     const systemMsg = messages.find(m => m.role === 'system');
-    if (systemMsg && systemMsg.content && systemMsg.content.includes('opencode')) {
-      console.log('  📱 Detected OpenCode client');
-      return require('./scenarios/opencode-scenario');
+    if (systemMsg && systemMsg.content) {
+      // 检测 OpenCode 客户端
+      if (systemMsg.content.includes('opencode')) {
+        console.log('  📱 Detected OpenCode client');
+        return require('./scenarios/opencode-scenario');
+      }
     }
   }
   console.log('  🔧 Using generic scenario');
@@ -426,10 +436,24 @@ app.post('/api/scenario', (req, res) => {
           longrunHours, longrunIntervalMs, resetAfterBytes, hangAfterChunks,
           streamErrorAfterMs, toolHangPartial, loopCount } = req.body;
   const validModes = ['scenario', 'echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun',
-                      'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker', 'thinking-hang'];
+                      'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker', 'thinking-hang', 'invalid-tool'];
   if (!validModes.includes(mode)) {
     return res.status(400).json({ error: 'Invalid mode' });
   }
+  
+  // 如果切换到 invalid-tool 模式，重置所有会话步骤
+  if (mode === 'invalid-tool' && scenarioConfig.mode !== 'invalid-tool') {
+    try {
+      const invalidToolScenario = require('./scenarios/invalid-tool-scenario');
+      if (invalidToolScenario.resetSession) {
+        invalidToolScenario.resetSession(); // 不传 sessionId 则重置所有会话
+        console.log('  🔄 Reset all invalid-tool sessions');
+      }
+    } catch (err) {
+      console.warn('  ⚠️  Failed to reset invalid-tool sessions:', err.message);
+    }
+  }
+  
   scenarioConfig.mode = mode;
   if (fixedReply        !== undefined) scenarioConfig.fixedReply        = String(fixedReply);
   if (delayMs           !== undefined) scenarioConfig.delayMs           = Math.max(0, parseInt(delayMs));
@@ -454,8 +478,8 @@ async function scenarioMiddleware(req, res, next) {
   const isStream = !!req.body?.stream;
   const model = req.body?.model || 'mock-model';
 
-  // scenario 和 tool-mocker 模式：放行，走多轮对话逻辑
-  if (mode === 'scenario' || mode === 'tool-mocker') return next();
+  // scenario、tool-mocker 和 invalid-tool 模式：放行，走多轮对话逻辑
+  if (mode === 'scenario' || mode === 'tool-mocker' || mode === 'invalid-tool') return next();
 
   // 其余模式在此直接响应
   logRequest(req.path, req.body);
@@ -1220,10 +1244,11 @@ app.post('/v1/chat/completions', scenarioMiddleware, async (req, res) => {
     return res.json(buildMessage(confirmContent, model));
   }
 
-  const { content, reasoning, toolCalls } = scenarios.getResponseWithTools(step, messages);
+  const { content, reasoning, toolCalls, finishReason } = scenarios.getResponseWithTools(step, messages, sessionId);
   console.log(`Responding with step ${step}`);
   if (reasoning) console.log(`  Reasoning: ${reasoning.substring(0, 80)}...`);
   if (toolCalls?.length) console.log(`  Tool calls: ${toolCalls.length} tool(s)`);
+  if (finishReason) console.log(`  Custom finish_reason: ${finishReason}`);
 
   // 检查是否需要自动循环（步骤13是完成总结，此时所有工具已执行完毕）
   let shouldAutoLoop = false;
@@ -1289,7 +1314,7 @@ app.post('/v1/chat/completions', scenarioMiddleware, async (req, res) => {
       res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: model || 'mock-model', choices: [{ index: 0, delta: { tool_calls: [{ index: toolIndex, id: loopToolCall.id, type: loopToolCall.type, function: loopToolCall.function }] }, finish_reason: null }] })}\n\n`);
     }
     
-    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: model || 'mock-model', choices: [{ index: 0, delta: {}, finish_reason: (toolCalls?.length || shouldAutoLoop) ? 'tool_calls' : 'stop' }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: model || 'mock-model', choices: [{ index: 0, delta: {}, finish_reason: finishReason || ((toolCalls?.length || shouldAutoLoop) ? 'tool_calls' : 'stop') }] })}\n\n`);
     res.write('data: [DONE]\n\n');
     return res.end();
   }
@@ -1322,7 +1347,7 @@ app.post('/v1/chat/completions', scenarioMiddleware, async (req, res) => {
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
     model: model || 'mock-model',
-    choices: [{ index: 0, message: responseMessage, finish_reason: allToolCalls.length ? 'tool_calls' : 'stop' }],
+    choices: [{ index: 0, message: responseMessage, finish_reason: finishReason || (allToolCalls.length ? 'tool_calls' : 'stop') }],
     usage: { prompt_tokens: 100, completion_tokens: 200, total_tokens: 300 },
   });
 });
