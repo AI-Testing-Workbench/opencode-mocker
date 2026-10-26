@@ -27,7 +27,23 @@ let scenarioConfig = {
   failKind: 'mid',        // 'mid'=流中途断开(触发 emitted 闸门) | 'http'=HTTP 错误码 | 'empty'=正常结束但空响应 | 'truncate'=finish=length 截断
   midWords: 3,            // mid 模式：断开前吐出的 content chunk 数（>0 才能命中"已流出内容"判定）
   recoverReply: '【mock 已恢复】服务恢复正常。我会从这里继续把任务做完，不需要再确认。',
+  // slow-turn 场景（extension→CLI headersTimeout 复现专用）：
+  // 让一轮 assistant 回复耗时远超 5 分钟，从而把同步阻塞的 /session/:id/resume 拖过 undici headersTimeout
+  slowTurnMs: 330000,     // 这一轮总耗时（默认 330s，刚好越过 undici 默认 300s headersTimeout）
+  slowStyle: 'stream',    // 'stream'=长思考慢吐字 | 'tools'=反复调工具拖长一轮
+  slowSteps: 5,           // tools 风格：这一轮内发起几次工具调用
+  slowStepMs: 60000,      // tools 风格：每次工具调用前等待多久（模拟慢工具）
+  slowTool: 'bash',       // tools 风格：使用哪个工具名
+  slowReportEveryMs: 30000, // 心跳日志间隔（服务端控制台，用于对照前端断开时刻）
+  // 首轮失败注入：制造 error 态，让 UI 出现"继续任务"按钮（否则永远走不到 resume）
+  slowFailFirst: false,   // 开启后前 slowFailTimes 次请求返回错误码
+  slowFailTimes: 1,       // 前几次失败
+  slowFailAfterMs: 3000,  // 失败前等待多久（让 UI 先显示忙碌）
+  slowFailCode: 500,      // 返回的错误码
 };
+
+// slow-turn 请求计数（内存）：区分"首轮"和"点继续后的 resume 轮"
+let slowTurnHits = 0;
 
 // ── flaky 场景请求计数（内存）：每次进入 flaky 分支 +1，达 failTimes 后恢复 ──
 let flakyHits = 0;
@@ -448,9 +464,12 @@ app.post('/api/scenario', (req, res) => {
   const { mode, fixedReply, delayMs, sizeMB, statusCode, message,
           longrunHours, longrunIntervalMs, resetAfterBytes, hangAfterChunks,
           streamErrorAfterMs, toolHangPartial, loopCount,
-          failTimes, failKind, midWords, recoverReply } = req.body;
+          failTimes, failKind, midWords, recoverReply,
+          slowTurnMs, slowStyle, slowSteps, slowStepMs, slowTool, slowReportEveryMs,
+          slowFailFirst, slowFailTimes, slowFailAfterMs, slowFailCode } = req.body;
   const validModes = ['scenario', 'echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun',
-                      'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker', 'thinking-hang', 'flaky'];
+                      'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker', 'thinking-hang', 'flaky',
+                      'slow-turn'];
   if (!validModes.includes(mode)) {
     return res.status(400).json({ error: 'Invalid mode' });
   }
@@ -472,6 +491,16 @@ app.post('/api/scenario', (req, res) => {
   if (failKind          !== undefined) scenarioConfig.failKind          = ['mid', 'http', 'empty', 'truncate'].includes(failKind) ? failKind : scenarioConfig.failKind;
   if (midWords          !== undefined) scenarioConfig.midWords          = Math.min(20, Math.max(0, parseInt(midWords)));
   if (recoverReply      !== undefined) scenarioConfig.recoverReply      = String(recoverReply);
+  if (slowTurnMs        !== undefined) scenarioConfig.slowTurnMs        = Math.min(900000, Math.max(1000, parseInt(slowTurnMs)));
+  if (slowStyle         !== undefined) scenarioConfig.slowStyle         = ['stream', 'tools'].includes(slowStyle) ? slowStyle : scenarioConfig.slowStyle;
+  if (slowSteps         !== undefined) scenarioConfig.slowSteps         = Math.min(50, Math.max(1, parseInt(slowSteps)));
+  if (slowStepMs        !== undefined) scenarioConfig.slowStepMs        = Math.min(600000, Math.max(0, parseInt(slowStepMs)));
+  if (slowTool          !== undefined) scenarioConfig.slowTool          = String(slowTool);
+  if (slowReportEveryMs !== undefined) scenarioConfig.slowReportEveryMs = Math.min(300000, Math.max(1000, parseInt(slowReportEveryMs)));
+  if (slowFailFirst     !== undefined) scenarioConfig.slowFailFirst     = !!slowFailFirst;
+  if (slowFailTimes     !== undefined) scenarioConfig.slowFailTimes     = Math.min(20, Math.max(0, parseInt(slowFailTimes)));
+  if (slowFailAfterMs   !== undefined) scenarioConfig.slowFailAfterMs   = Math.min(600000, Math.max(0, parseInt(slowFailAfterMs)));
+  if (slowFailCode      !== undefined) scenarioConfig.slowFailCode      = parseInt(slowFailCode);
   // 切到 flaky、或重新设置时，重置请求计数，确保"前 N 次失败"从干净状态开始
   if (mode === 'flaky') {
     flakyHits = 0;
@@ -479,8 +508,12 @@ app.post('/api/scenario', (req, res) => {
   } else if (prevMode === 'flaky') {
     flakyHits = 0;
   }
+  // 切到 slow-turn、或重新设置时重置请求计数，让"前 N 次失败"从干净状态开始
+  if (mode === 'slow-turn') {
+    slowTurnHits = 0;
+  }
   console.log(`\n🎭 Scenario changed: ${JSON.stringify(scenarioConfig)}`);
-  res.json({ ok: true, config: { ...scenarioConfig, flakyHits } });
+  res.json({ ok: true, config: { ...scenarioConfig, flakyHits, slowTurnHits } });
 });
 
 // ── flaky 手动重置计数（不切模式） ──
@@ -828,6 +861,149 @@ async function scenarioMiddleware(req, res, next) {
     console.log(`  ⏳ Connection hanging after sending reasoning (no content or [DONE] will be sent)`);
     // 不发送 content，不发送 [DONE]，连接保持打开状态
     return;
+  }
+
+  // ── slow-turn：让一轮 assistant 回复远超 5 分钟（复现 extension→CLI headersTimeout） ──
+  //
+  // 背景：/session/:id/resume 是同步阻塞的，要等整轮 runLoop 结束才返回响应头。
+  // VS Code 扩展用 Node/Electron 的 fetch，undici 默认 headersTimeout=300s，
+  // 于是长任务必然在 5 分钟处被前端掐断（UND_ERR_HEADERS_TIMEOUT），
+  // 但后端 fiber 仍在跑，UI 静默失败。
+  //
+  // 这个场景把「一轮」拖长，配合 test-headers-timeout.js 可稳定复现。
+  if (mode === 'slow-turn') {
+    const { slowTurnMs, slowStyle, slowSteps, slowStepMs, slowTool, slowReportEveryMs } = scenarioConfig;
+    const startTime = Date.now();
+    const id = `chatcmpl-${uuidv4()}`;
+    const created = Math.floor(Date.now() / 1000);
+
+    // 心跳：每 slowReportEveryMs 打一条，方便和前端断开时刻对齐
+    const heartbeat = setInterval(() => {
+      const elapsed = Math.round((Date.now() - startTime) / 1000);
+      const over = elapsed * 1000 > 300000 ? ' ⚠️ 已越过 undici headersTimeout(300s)' : '';
+      console.log(`  🐢 slow-turn 已持续 ${elapsed}s / ${Math.round(slowTurnMs / 1000)}s${over}`);
+    }, slowReportEveryMs);
+    const stop = () => clearInterval(heartbeat);
+    req.on('close', stop);
+
+    // 判断这次请求是不是"工具结果回灌"（tools 风格下每轮工具执行完会再来一次）
+    const lastMsg = (req.body?.messages || []).slice(-1)[0];
+    const isToolResult = lastMsg?.role === 'tool';
+
+    console.log(`  🐢 Slow-turn mode: style=${slowStyle}, target=${slowTurnMs}ms, isToolResult=${!!isToolResult}`);
+
+    // ── 首轮注入失败：让 UI 进入 error 态，才会出现"继续任务"按钮 ──
+    //
+    // 这是复现 headersTimeout 的**必要前置条件**：
+    //   ChatView.canContinue() 要求 lastAssistantMsg().error 存在才显示"继续"按钮，
+    //   而普通发消息走的是 promptAsync（立刻返回 204，永不超时）。
+    //   只有先让首轮失败 → 用户点"继续" → 才走同步阻塞的 session.resume。
+    //
+    // 注意：不能用 messages 区分"首轮"和"继续轮"——resume 会重放同一份历史。
+    // 所以用请求计数器 slowTurnHits，只让前 slowFailTimes 次失败。
+    if (scenarioConfig.slowFailFirst) {
+      slowTurnHits += 1;
+      const failing = slowTurnHits <= scenarioConfig.slowFailTimes;
+      console.log(`  🎯 slow-turn 请求 #${slowTurnHits}: ${failing ? `❌ 注入失败（前 ${scenarioConfig.slowFailTimes} 次）` : '✅ 走慢轮（供 resume 复现）'}`);
+
+      if (failing) {
+        const failAfterMs = Math.min(slowTurnMs, Math.max(0, scenarioConfig.slowFailAfterMs));
+        console.log(`  💥 slow-turn: ${failAfterMs}ms 后返回 ${scenarioConfig.slowFailCode}，制造 error 态`);
+        await sleep(failAfterMs);
+        stop();
+        return res.status(scenarioConfig.slowFailCode).json({
+          error: { message: scenarioConfig.message, type: 'mock_slow_turn_error', code: scenarioConfig.slowFailCode },
+        });
+      }
+    }
+
+    // ── tools 风格：返回工具调用，靠工具往返把这一轮拖长 ──
+    // 用户消息 → 发工具调用；工具结果回灌 → 等 slowStepMs 再发下一个工具调用。
+    // 注意这里不能排除 isToolResult，否则回灌会落到下面的 stream 分支跑满 slowTurnMs。
+    if (slowStyle === 'tools') {
+      // 统计本轮已经发起了几次工具调用
+      const msgs = req.body?.messages || [];
+      const lastUserIndex = msgs.map(m => m.role).lastIndexOf('user');
+      const issued = msgs.slice(lastUserIndex + 1).filter(m => m.role === 'assistant' && m.tool_calls?.length).length;
+      const callId = 'call_slow_' + uuidv4().substring(0, 8);
+
+      console.log(`  🔧 slow-turn tools: 第 ${issued + 1}/${slowSteps} 次工具调用 (${slowTool})`);
+
+      // 已达到步数上限 → 正常收尾，让这一轮结束
+      if (issued >= slowSteps) {
+        stop();
+        const done = `已完成 ${slowSteps} 步慢工具调用（总耗时 ${Math.round((Date.now() - startTime) / 1000)}s）。任务完成。`;
+        if (isStream) return sendStream(res, done, model);
+        return res.json(buildMessage(done, model));
+      }
+
+      const toolCall = {
+        id: callId,
+        type: 'function',
+        function: { name: slowTool, arguments: JSON.stringify({ command: `echo slow-step-${issued + 1}`, description: `slow turn step ${issued + 1}` }) },
+      };
+
+      // 工具结果回灌后先等 slowStepMs，模拟"慢工具"，把这一轮的墙钟时间拖长
+      if (isToolResult && slowStepMs > 0) {
+        console.log(`  ⏱️  slow-turn: 模拟慢工具，等待 ${slowStepMs}ms 后再发起下一步`);
+        await sleep(slowStepMs);
+      }
+
+      if (isStream) {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: toolCall.id, type: toolCall.type, function: { name: toolCall.function.name, arguments: '' } }] }, finish_reason: null }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: toolCall.function.arguments } }] }, finish_reason: null }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        stop();
+        return res.end();
+      }
+
+      stop();
+      return res.json({
+        id, object: 'chat.completion', created, model,
+        choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [toolCall] }, finish_reason: 'tool_calls' }],
+        usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+      });
+    }
+
+    // ── stream 风格（默认）：在同一个 SSE 流里慢慢吐字，直到超过目标时长 ──
+    // 这是最贴近真实"长思考"的形态：CLI 侧一轮 runLoop 一直不结束，resume 响应头一直不返回
+    if (isStream) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] })}\n\n`);
+
+      // 每 tick 吐一小段，直到累计达到 slowTurnMs。
+      // tick 取目标时长的 1/10（夹在 200ms~2000ms），避免短时长场景被固定 2s 拍子拖过头。
+      const tick = Math.min(2000, Math.max(200, Math.floor(slowTurnMs / 10)));
+      while (Date.now() - startTime < slowTurnMs) {
+        if (res.writableEnded) { stop(); return; }
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        const piece = `[${elapsed}s] ${randomSentence()}\n`;
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: piece }, finish_reason: null }] })}\n\n`);
+        // 最后一拍不要睡满，精确停在目标时长附近
+        const remaining = slowTurnMs - (Date.now() - startTime);
+        await sleep(Math.max(0, Math.min(tick, remaining)));
+      }
+
+      const total = Math.round((Date.now() - startTime) / 1000);
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: `\n✅ slow-turn 完成，本轮耗时 ${total}s。` }, finish_reason: null }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      stop();
+      return res.end();
+    }
+
+    // 非流式：直接等满 slowTurnMs 再一次性返回
+    await sleep(slowTurnMs);
+    stop();
+    const total = Math.round((Date.now() - startTime) / 1000);
+    return res.json(buildMessage(`slow-turn 完成，本轮耗时 ${total}s。`, model));
   }
 
   return res.status(400).json({ error: `Unknown mode: ${mode}` });

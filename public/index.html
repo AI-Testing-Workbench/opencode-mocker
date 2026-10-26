@@ -325,6 +325,7 @@
             <option value="tool-hang">Tool Hang — 工具调用挂起</option>
             <option value="thinking-hang">Thinking Hang — 思考后挂起 🧠</option>
             <option value="flaky">Flaky — 前 N 次失败后恢复 🎲（YOLO 错误中断）</option>
+            <option value="slow-turn">Slow Turn — 单轮超 5 分钟 🐢（headersTimeout 复现）</option>
           </optgroup>
           <optgroup label="工具测试">
             <option value="tool-mocker">Tool Mocker — 工具响应模拟 🔧</option>
@@ -530,6 +531,74 @@
       <button class="apply-btn" onclick="resetFlaky()" style="margin-top: 4px;">重置计数</button>
     </div>
 
+    <!-- slow-turn config -->
+    <div class="config-panel" id="cfg-slow-turn">
+      <div class="section-title">Slow Turn：单轮超 5 分钟 🐢</div>
+      <div class="hint" style="margin-bottom: 12px; padding: 8px; background: #161b22; border-radius: 4px;">
+        复现 <code style="color: #f85149;">UND_ERR_HEADERS_TIMEOUT</code>：
+        <code>/session/:id/resume</code> 是同步阻塞的，要等整轮跑完才返回响应头；
+        扩展侧 undici 默认 <b>headersTimeout = 300s</b>，于是必然在 5 分钟处被掐断，而后端仍在跑。
+      </div>
+      <div>
+        <label>本轮目标耗时 slowTurnMs (ms)</label>
+        <input type="number" id="slowTurnMs" value="330000" min="1000" max="900000" step="1000" />
+        <div class="hint">默认 330000（330s），刚好越过 300s 阈值；调试时可设 20000 快速验证</div>
+      </div>
+      <div>
+        <label>拖长方式 slowStyle</label>
+        <select id="slowStyle">
+          <option value="stream">stream — 单轮流式慢吐字（最贴近真实长思考）⭐</option>
+          <option value="tools">tools — 反复调工具拖长一轮（模拟慢工具）</option>
+        </select>
+      </div>
+      <div>
+        <label>tools 风格：工具调用次数 slowSteps</label>
+        <input type="number" id="slowSteps" value="5" min="1" max="50" step="1" />
+      </div>
+      <div>
+        <label>tools 风格：每步前等待 slowStepMs (ms)</label>
+        <input type="number" id="slowStepMs" value="60000" min="0" max="600000" step="1000" />
+        <div class="hint">5 × 60s = 300s，同样能越过阈值</div>
+      </div>
+      <div>
+        <label>tools 风格：使用的工具名</label>
+        <input type="text" id="slowTool" value="bash" />
+      </div>
+      <div>
+        <label>心跳日志间隔 slowReportEveryMs (ms)</label>
+        <input type="number" id="slowReportEveryMs" value="30000" min="1000" max="300000" step="1000" />
+        <div class="hint">服务端控制台每隔多久打一条进度，用于和前端断开时刻对齐</div>
+      </div>
+      <div>
+        <label>首轮注入失败 slowFailFirst ⭐</label>
+        <select id="slowFailFirst">
+          <option value="true">开启 — 先失败制造 error 态（否则走不到 resume）⭐</option>
+          <option value="false">关闭 — 一直慢跑，正常完成</option>
+        </select>
+        <div class="hint">必开：<code>canContinue()</code> 要求 assistant 消息带 <code>error</code> 才显示「继续任务」按钮</div>
+      </div>
+      <div>
+        <label>失败次数 slowFailTimes</label>
+        <input type="number" id="slowFailTimes" value="1" min="0" max="20" step="1" />
+        <div class="hint">前 N 次请求返回错误码，第 N+1 次起走慢轮（供 resume 复现）</div>
+      </div>
+      <div>
+        <label>失败前等待 slowFailAfterMs (ms)</label>
+        <input type="number" id="slowFailAfterMs" value="3000" min="0" max="600000" step="1000" />
+      </div>
+      <div>
+        <label>错误码 slowFailCode</label>
+        <input type="number" id="slowFailCode" value="500" min="400" max="599" step="1" />
+      </div>
+      <div class="hint" style="margin-top: 8px; padding: 8px; background: #161b22; border-radius: 4px;">
+        🐢 预期：<br/>
+        · 点"继续任务"后按钮无响应，约 <b>300s</b> 后 Extension Host 输出 <code>fetch failed / UND_ERR_HEADERS_TIMEOUT</code><br/>
+        · 同时 CLI 侧日志仍在输出 → 证明后端没挂，只是前端放弃等待<br/>
+        · 再点一次"继续"会叠加一个新的等待，同样 5 分钟后再失败
+      </div>
+      <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
     <!-- tool-mocker config -->
     <div class="config-panel" id="cfg-tool-mocker">
       <div class="section-title">工具响应模拟 🔧</div>
@@ -590,6 +659,7 @@
     'tool-hang':   { cls: 'badge-tool-hang',     text: 'Tool Hang'     },
     'thinking-hang': { cls: 'badge-hang',        text: 'Thinking Hang 🧠' },
     'flaky':         { cls: 'badge-reset',       text: 'Flaky 🎲'      },
+    'slow-turn':     { cls: 'badge-hang',        text: 'Slow Turn 🐢'  },
     'tool-mocker': { cls: 'badge-scenario',      text: 'Tool Mocker 🔧' },
     'invalid-tool': { cls: 'badge-error',        text: 'Invalid Tool ⚠️' },
   };
@@ -604,7 +674,7 @@
   function onModeChange() {
     const mode = document.getElementById('modeSelect').value;
     // show/hide config panels
-    ['scenario','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','thinking-hang','flaky','tool-mocker'].forEach(m => {
+    ['scenario','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','thinking-hang','flaky','slow-turn','tool-mocker'].forEach(m => {
       document.getElementById(`cfg-${m}`).classList.toggle('active', m === mode);
     });
     // instant modes apply immediately
@@ -663,6 +733,18 @@
       body.failKind    = document.getElementById('failKind').value;
       body.midWords    = parseInt(document.getElementById('midWords').value) || 0;
       body.recoverReply = document.getElementById('recoverReply').value || undefined;
+    } else if (mode === 'slow-turn') {
+      body.slowTurnMs        = parseInt(document.getElementById('slowTurnMs').value) || 330000;
+      body.slowStyle         = document.getElementById('slowStyle').value;
+      body.slowSteps         = parseInt(document.getElementById('slowSteps').value) || 5;
+      body.slowStepMs        = parseInt(document.getElementById('slowStepMs').value) || 0;
+      body.slowTool          = document.getElementById('slowTool').value || 'bash';
+      body.slowReportEveryMs = parseInt(document.getElementById('slowReportEveryMs').value) || 30000;
+      body.slowFailFirst     = document.getElementById('slowFailFirst').value === 'true';
+      body.slowFailTimes     = parseInt(document.getElementById('slowFailTimes').value);
+      if (Number.isNaN(body.slowFailTimes)) body.slowFailTimes = 1;
+      body.slowFailAfterMs   = parseInt(document.getElementById('slowFailAfterMs').value) || 0;
+      body.slowFailCode      = parseInt(document.getElementById('slowFailCode').value) || 500;
     } else if (mode === 'tool-mocker') {
       // Tool mocker mode - just switch mode, config is managed separately
     }
@@ -898,6 +980,16 @@
       if (data.hangAfterChunks)    document.getElementById('hangAfterChunks').value    = data.hangAfterChunks;
       if (data.streamErrorAfterMs) document.getElementById('streamErrorAfterMs').value = data.streamErrorAfterMs;
       if (data.toolHangPartial)    document.getElementById('toolHangPartial').value    = data.toolHangPartial;
+      if (data.slowTurnMs)         document.getElementById('slowTurnMs').value         = data.slowTurnMs;
+      if (data.slowStyle)          document.getElementById('slowStyle').value          = data.slowStyle;
+      if (data.slowSteps)          document.getElementById('slowSteps').value          = data.slowSteps;
+      if (data.slowStepMs !== undefined) document.getElementById('slowStepMs').value   = data.slowStepMs;
+      if (data.slowTool)           document.getElementById('slowTool').value           = data.slowTool;
+      if (data.slowReportEveryMs)  document.getElementById('slowReportEveryMs').value  = data.slowReportEveryMs;
+      document.getElementById('slowFailFirst').value   = data.slowFailFirst ? 'true' : 'false';
+      if (data.slowFailTimes !== undefined)   document.getElementById('slowFailTimes').value   = data.slowFailTimes;
+      if (data.slowFailAfterMs !== undefined) document.getElementById('slowFailAfterMs').value = data.slowFailAfterMs;
+      if (data.slowFailCode)                  document.getElementById('slowFailCode').value    = data.slowFailCode;
     } catch {}
     
     // Load tool config

@@ -47,8 +47,29 @@ node test-abort-scenario.js
 - **tool-hang**: 工具调用挂起
 - **thinking-hang**: 思考内容后挂起
 - **flaky**: 前 N 次调用失败后自动恢复 🎲（YOLO 错误中断自动化测试专用，含 mid/http/empty/truncate 四形态）
+- **slow-turn**: 单轮拖超 5 分钟 🐢（复现 extension→CLI 的 `UND_ERR_HEADERS_TIMEOUT`）
 
 查看 YOLO 错误中断测试指南：[YOLO_ERROR_TEST.md](./YOLO_ERROR_TEST.md)
+
+### 🐢 headersTimeout 复现
+
+复现 `TypeError: fetch failed` / `UND_ERR_HEADERS_TIMEOUT`：`/session/:id/resume` 同步阻塞，
+要等整轮跑完才回响应头，而扩展侧 undici 默认 `headersTimeout = 300s`。
+
+```bash
+# 切到 slow-turn：首轮注入失败 + 后续慢轮 330s
+curl -X POST localhost:3100/api/scenario \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"slow-turn","slowStyle":"stream","slowTurnMs":330000,"slowFailFirst":true,"slowFailTimes":1}'
+
+# 验证 mocker 能否稳定拖够时长（8 项检查）
+npm run test:headers-timeout
+```
+
+> ⚠️ `slowFailFirst` 必开：`canContinue()` 要求 assistant 消息带 `error` 才显示「继续任务」按钮，
+> 首轮正常完成就走不到 `resume`，也就复现不了。
+
+查看完整复现与回归步骤：[HEADERS_TIMEOUT_TEST.md](./HEADERS_TIMEOUT_TEST.md)
 
 ## 场景配置
 
@@ -127,6 +148,8 @@ opencode-mocker/
 ├── test-abort-scenario.js       # Abort 测试脚本（新增）
 ├── test-abort.sh                # 快速测试脚本（新增）
 ├── ABORT_TEST.md                # Abort 测试文档（新增）
+├── test-headers-timeout.js      # headersTimeout 复现验证脚本
+├── HEADERS_TIMEOUT_TEST.md      # headersTimeout 复现文档
 ├── test-client.js               # 通用测试客户端
 ├── test-stream.js               # 流式测试
 ├── test-tool-mocker.js          # 工具 mock 测试

@@ -9,7 +9,8 @@
     "test": "node test-client.js",
     "test:openai": "node test-openai-format.js",
     "test:stream": "node test-stream.js",
-    "test:mocker": "node test-tool-mocker.js"
+    "test:mocker": "node test-tool-mocker.js",
+    "test:headers-timeout": "node test-headers-timeout.js"
   },
   "keywords": [
     "mock",
