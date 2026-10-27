@@ -48,6 +48,26 @@ node test-abort-scenario.js
 - **thinking-hang**: 思考内容后挂起
 - **flaky**: 前 N 次调用失败后自动恢复 🎲（YOLO 错误中断自动化测试专用，含 mid/http/empty/truncate 四形态）
 - **slow-turn**: 单轮拖超 5 分钟 🐢（复现 extension→CLI 的 `UND_ERR_HEADERS_TIMEOUT`）
+- **longturns**: 长轮次对话压测 🔁（自驱动 50/100/150 轮，测 webview 多轮渲染是否崩）
+
+### 🔁 长轮次压测（webview 崩溃测试）
+
+无需人工输入：mocker 每条回复都附带一个无害的 `bash echo` 工具调用，客户端执行工具后自动回灌并再次请求，
+自驱动跑满 N 轮后发收尾消息结束。每轮 ≈ 1 条助手消息 + 1 次工具往返（50/100/150 轮约产生
+100/200/300 条消息项），用于压测 webview 在长对话下的渲染与内存稳定性。
+
+```bash
+# 切换并设置轮数（turnDelayMs 控制每轮节奏，0 = 最快加压）
+curl -X POST localhost:3100/api/scenario \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"longturns","turns":100,"turnDelayMs":300}'
+
+# 不打开 webview，先用驱动脚本自校验轮数是否精确（50/100/150）
+npm run test:longturns -- 100
+```
+
+然后在 VS Code 里向该 mock 提供商发一条消息，对话即可自动跑到设定轮数；观察 webview 是否白屏、
+卡死或崩溃。也可在 http://localhost:3100 控制面板中选择 "Long Turns" 并选 50/100/150 轮。
 
 查看 YOLO 错误中断测试指南：[YOLO_ERROR_TEST.md](./YOLO_ERROR_TEST.md)
 

@@ -22,6 +22,9 @@ let scenarioConfig = {
   toolHangPartial: 0.5,  // tool-hang 场景：工具参数发送比例（0-1）
   // 场景循环参数
   loopCount: 10,          // scenario 场景：循环次数
+  // longturns 场景（webview 多轮压力测试专用）：自驱动 N 轮对话，每轮 1 条文本 + 1 次工具调用
+  turns: 50,              // 总轮数（可选 50 / 100 / 150）
+  turnDelayMs: 300,       // 每轮响应前等待，控制渲染节奏便于观察 webview
   // flaky 场景（YOLO 错误/中断恢复专用）：前 failTimes 次 LLM 调用失败，之后恢复正常
   failTimes: 2,           // 连续失败几次后恢复（默认 2）
   failKind: 'mid',        // 'mid'=流中途断开(触发 emitted 闸门) | 'http'=HTTP 错误码 | 'empty'=正常结束但空响应 | 'truncate'=finish=length 截断
@@ -47,6 +50,9 @@ let slowTurnHits = 0;
 
 // ── flaky 场景请求计数（内存）：每次进入 flaky 分支 +1，达 failTimes 后恢复 ──
 let flakyHits = 0;
+
+// ── longturns 轮次计数（内存）：sessionId -> { done } ──
+const longTurns = new Map();
 
 // ── 会话循环跟踪（内存） ──
 const sessionLoops = new Map(); // sessionId -> { current: number, total: number, currentStep: number }
@@ -464,12 +470,13 @@ app.post('/api/scenario', (req, res) => {
   const { mode, fixedReply, delayMs, sizeMB, statusCode, message,
           longrunHours, longrunIntervalMs, resetAfterBytes, hangAfterChunks,
           streamErrorAfterMs, toolHangPartial, loopCount,
+          turns, turnDelayMs,
           failTimes, failKind, midWords, recoverReply,
           slowTurnMs, slowStyle, slowSteps, slowStepMs, slowTool, slowReportEveryMs,
           slowFailFirst, slowFailTimes, slowFailAfterMs, slowFailCode } = req.body;
   const validModes = ['scenario', 'echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun',
                       'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker', 'thinking-hang', 'flaky',
-                      'slow-turn'];
+                      'slow-turn', 'longturns'];
   if (!validModes.includes(mode)) {
     return res.status(400).json({ error: 'Invalid mode' });
   }
@@ -486,7 +493,9 @@ app.post('/api/scenario', (req, res) => {
   if (hangAfterChunks   !== undefined) scenarioConfig.hangAfterChunks   = Math.min(20, Math.max(1, parseInt(hangAfterChunks)));
   if (streamErrorAfterMs !== undefined) scenarioConfig.streamErrorAfterMs = Math.min(10000, Math.max(100, parseInt(streamErrorAfterMs)));
   if (toolHangPartial   !== undefined) scenarioConfig.toolHangPartial   = Math.min(1, Math.max(0, parseFloat(toolHangPartial)));
-  if (loopCount         !== undefined) scenarioConfig.loopCount         = Math.min(100, Math.max(1, parseInt(loopCount)));
+  if (loopCount         !== undefined) scenarioConfig.loopCount         = Math.min(150, Math.max(1, parseInt(loopCount)));
+  if (turns             !== undefined) scenarioConfig.turns             = Math.min(150, Math.max(1, parseInt(turns)));
+  if (turnDelayMs       !== undefined) scenarioConfig.turnDelayMs       = Math.min(60000, Math.max(0, parseInt(turnDelayMs)));
   if (failTimes         !== undefined) scenarioConfig.failTimes         = Math.min(50, Math.max(0, parseInt(failTimes)));
   if (failKind          !== undefined) scenarioConfig.failKind          = ['mid', 'http', 'empty', 'truncate'].includes(failKind) ? failKind : scenarioConfig.failKind;
   if (midWords          !== undefined) scenarioConfig.midWords          = Math.min(20, Math.max(0, parseInt(midWords)));
@@ -512,6 +521,11 @@ app.post('/api/scenario', (req, res) => {
   if (mode === 'slow-turn') {
     slowTurnHits = 0;
   }
+  // 切到 longturns 或修改轮数时，清空所有会话轮次计数，从头开始
+  if (mode === 'longturns' || turns !== undefined) {
+    longTurns.clear();
+    console.log(`\n🔁 longturns 轮次计数已清空 (turns=${scenarioConfig.turns}, delay=${scenarioConfig.turnDelayMs}ms)`);
+  }
   console.log(`\n🎭 Scenario changed: ${JSON.stringify(scenarioConfig)}`);
   res.json({ ok: true, config: { ...scenarioConfig, flakyHits, slowTurnHits } });
 });
@@ -530,8 +544,8 @@ async function scenarioMiddleware(req, res, next) {
   const isStream = !!req.body?.stream;
   const model = req.body?.model || 'mock-model';
 
-  // scenario、tool-mocker 和 invalid-tool 模式：放行，走多轮对话逻辑
-  if (mode === 'scenario' || mode === 'tool-mocker' || mode === 'invalid-tool') return next();
+  // scenario、tool-mocker、invalid-tool 和 longturns 模式：放行，走多轮对话逻辑
+  if (mode === 'scenario' || mode === 'tool-mocker' || mode === 'invalid-tool' || mode === 'longturns') return next();
 
   // 其余模式在此直接响应
   logRequest(req.path, req.body);
@@ -1483,6 +1497,76 @@ app.post('/v1/chat/completions', scenarioMiddleware, async (req, res) => {
     }
   }
   
+  // ── longturns：自驱动 N 轮对话（webview 多轮压力测试专用） ──
+  //
+  // 原理：每条 assistant 回复都带一个无害的 bash echo 工具调用，客户端执行工具后
+  // 会自动回灌 tool 结果并再次请求 LLM —— 如此自驱动，无需人工输入。
+  // 每轮 = 1 条 assistant 文本 + 1 次工具往返；跑满 turns 轮后发一条收尾消息（stop）。
+  // 50/100/150 轮分别产生约 100/200/300 条消息项，用于压测 webview 渲染是否会崩。
+  if (scenarioConfig.mode === 'longturns') {
+    const { turns, turnDelayMs } = scenarioConfig;
+    const sessionId = getSessionId(messages);
+    const lastMsg = messages[messages.length - 1];
+
+    // 新对话（用户消息开头）或计数丢失（服务重启）时重置该会话轮次
+    if (lastMsg?.role === 'user' || !longTurns.has(sessionId)) {
+      longTurns.set(sessionId, { done: 0 });
+    }
+    const state = longTurns.get(sessionId);
+
+    if (turnDelayMs > 0) await sleep(turnDelayMs);
+
+    // 轮数用完：收尾（无工具调用），本轮对话结束
+    if (state.done >= turns) {
+      longTurns.delete(sessionId);
+      const content = `长轮次压测完成：共执行 ${turns} 轮，每轮 1 条助手回复 + 1 次工具调用，累计约 ${turns * 2} 条消息项。若 webview 未崩溃则本轮压力测试通过。`;
+      console.log(`  🔁 Longturns done: ${turns} turns, session=${sessionId.substring(0, 20)}`);
+      logRequest('/v1/chat/completions', req.body, { mockerMode: 'longturns', phase: 'finish', done: turns });
+      if (stream) return sendStream(res, content, model);
+      return res.json(buildMessage(content, model));
+    }
+
+    state.done++;
+    const cur = state.done;
+    const content = `【第 ${cur}/${turns} 轮】${randomSentence()}`;
+    const toolCall = {
+      id: `call_longturn_${cur}_${Date.now()}`,
+      type: 'function',
+      function: {
+        name: 'bash',
+        arguments: JSON.stringify({
+          command: `echo "longturn ${cur}/${turns}"`,
+          description: `长轮次压测第 ${cur} 轮`
+        })
+      }
+    };
+    console.log(`  🔁 Longturns turn ${cur}/${turns}, session=${sessionId.substring(0, 20)}`);
+    logRequest('/v1/chat/completions', req.body, { mockerMode: 'longturns', phase: 'turn', done: cur, total: turns });
+
+    if (stream) {
+      const id = `chatcmpl-${uuidv4()}`;
+      const created = Math.floor(Date.now() / 1000);
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: model || 'mock-model', choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: model || 'mock-model', choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: model || 'mock-model', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: toolCall.id, type: toolCall.type, function: toolCall.function }] }, finish_reason: null }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: model || 'mock-model', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
+
+    return res.json({
+      id: `chatcmpl-${uuidv4()}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: model || 'mock-model',
+      choices: [{ index: 0, message: { role: 'assistant', content, tool_calls: [toolCall] }, finish_reason: 'tool_calls' }],
+      usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+    });
+  }
+
   // 原有的 scenario 逻辑
   logRequest('/v1/chat/completions', req.body);
   const scenarios = getScenarioModule(messages);
