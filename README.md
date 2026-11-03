@@ -18,7 +18,26 @@ node test-client.js
 
 ## 测试场景
 
-### 🛑 Abort 测试（新增！）
+### 🔁 连续相同内容检测测试（新增！）
+
+测试模型连续 3 次返回完全相同内容时的死循环保护：
+
+```bash
+# 方法 1：自动化测试脚本
+./test-duplicate-response.sh
+
+# 方法 2：手动运行测试
+node test-duplicate-response.js
+```
+
+**测试内容**：
+- 模拟模型连续 3 次返回相同的文本和工具调用
+- 验证系统能否正确检测并自动停止
+- 确认在第 3 步后停止，不继续执行第 4 步
+
+**场景文件**：`scenarios/duplicate-response-scenario.js`
+
+### 🛑 Abort 测试
 
 测试 session abort 后 UI 状态恢复：
 
@@ -35,6 +54,7 @@ node test-abort-scenario.js
 ### 🎭 其他测试场景
 
 - **scenario**: 多轮对话场景（支持工具调用）
+- **duplicate-response**: 连续 3 次返回相同内容（死循环检测）🔁
 - **echo**: 回显用户输入
 - **fixed**: 返回固定响应
 - **delay**: 延迟响应
@@ -154,27 +174,31 @@ tail -f logs/all_requests.jsonl | jq .
 
 - `opencode-scenario.js` - OpenCode 客户端场景
 - `web-project-scenario.js` - Web 项目场景
-- `abort-test-scenario.js` - Abort 测试场景（新增）
+- `duplicate-response-scenario.js` - 连续相同内容测试场景（新增）
+- `abort-test-scenario.js` - Abort 测试场景
 
 ## 文件结构
 
 ```
 opencode-mocker/
-├── server.js                    # 主服务器
-├── scenarios/                   # 场景定义
+├── server.js                          # 主服务器
+├── scenarios/                         # 场景定义
 │   ├── opencode-scenario.js
 │   ├── web-project-scenario.js
-│   └── abort-test-scenario.js   # 新增
-├── test-abort-scenario.js       # Abort 测试脚本（新增）
-├── test-abort.sh                # 快速测试脚本（新增）
-├── ABORT_TEST.md                # Abort 测试文档（新增）
-├── test-headers-timeout.js      # headersTimeout 复现验证脚本
-├── HEADERS_TIMEOUT_TEST.md      # headersTimeout 复现文档
-├── test-client.js               # 通用测试客户端
-├── test-stream.js               # 流式测试
-├── test-tool-mocker.js          # 工具 mock 测试
-├── logs/                        # 请求日志
-└── public/                      # Web UI
+│   ├── duplicate-response-scenario.js # 新增
+│   └── abort-test-scenario.js
+├── test-duplicate-response.js         # 连续相同内容测试脚本（新增）
+├── test-duplicate-response.sh         # 快速测试脚本（新增）
+├── test-abort-scenario.js             # Abort 测试脚本
+├── test-abort.sh                      # 快速测试脚本
+├── ABORT_TEST.md                      # Abort 测试文档
+├── test-headers-timeout.js            # headersTimeout 复现验证脚本
+├── HEADERS_TIMEOUT_TEST.md            # headersTimeout 复现文档
+├── test-client.js                     # 通用测试客户端
+├── test-stream.js                     # 流式测试
+├── test-tool-mocker.js                # 工具 mock 测试
+├── logs/                              # 请求日志
+└── public/                            # Web UI
 ```
 
 ## API 端点

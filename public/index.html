@@ -312,6 +312,7 @@
       <div class="mode-card">
         <select id="modeSelect" onchange="onModeChange()">
           <option value="scenario">Scenario — 多轮对话场景</option>
+          <option value="duplicate-response">Duplicate Response — 连续相同内容检测 🔁</option>
           <option value="longturns">Long Turns — 长轮次对话压测 🔁（50/100/150 轮）</option>
           <option value="echo">Echo — 回显用户输入</option>
           <option value="fixed">Fixed — 固定回复</option>
@@ -668,6 +669,7 @@
 <script>
   const BADGE = {
     scenario:      { cls: 'badge-scenario',      text: 'Scenario'      },
+    'duplicate-response': { cls: 'badge-error',  text: 'Duplicate Response 🔁' },
     'longturns':   { cls: 'badge-scenario',      text: 'Long Turns 🔁' },
     echo:          { cls: 'badge-echo',          text: 'Echo'          },
     fixed:         { cls: 'badge-fixed',         text: 'Fixed'         },
@@ -687,7 +689,7 @@
   };
 
   // modes that have no config panel and apply immediately on select
-  const INSTANT_MODES = new Set(['scenario', 'echo', 'invalid-tool']);
+  const INSTANT_MODES = new Set(['scenario', 'duplicate-response', 'echo', 'invalid-tool']);
 
   let logs = [];
   let selectedKey = null; // 当前展开的日志 timestamp

@@ -334,6 +334,11 @@ function getScenarioModule(messages) {
     return require('./scenarios/invalid-tool-scenario');
   }
   
+  if (scenarioConfig.mode === 'duplicate-response') {
+    console.log('  🔁 Using duplicate-response test scenario');
+    return require('./scenarios/duplicate-response-scenario');
+  }
+  
   // 然后检查消息内容
   if (messages && messages.length > 0) {
     const systemMsg = messages.find(m => m.role === 'system');
@@ -474,7 +479,7 @@ app.post('/api/scenario', (req, res) => {
           failTimes, failKind, midWords, recoverReply,
           slowTurnMs, slowStyle, slowSteps, slowStepMs, slowTool, slowReportEveryMs,
           slowFailFirst, slowFailTimes, slowFailAfterMs, slowFailCode } = req.body;
-  const validModes = ['scenario', 'echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun',
+  const validModes = ['scenario', 'duplicate-response', 'echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun',
                       'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker', 'thinking-hang', 'flaky',
                       'slow-turn', 'longturns'];
   if (!validModes.includes(mode)) {
@@ -544,8 +549,8 @@ async function scenarioMiddleware(req, res, next) {
   const isStream = !!req.body?.stream;
   const model = req.body?.model || 'mock-model';
 
-  // scenario、tool-mocker、invalid-tool 和 longturns 模式：放行，走多轮对话逻辑
-  if (mode === 'scenario' || mode === 'tool-mocker' || mode === 'invalid-tool' || mode === 'longturns') return next();
+  // scenario、duplicate-response、tool-mocker、invalid-tool 和 longturns 模式：放行，走多轮对话逻辑
+  if (mode === 'scenario' || mode === 'duplicate-response' || mode === 'tool-mocker' || mode === 'invalid-tool' || mode === 'longturns') return next();
 
   // 其余模式在此直接响应
   logRequest(req.path, req.body);
