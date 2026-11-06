@@ -332,6 +332,7 @@
           <optgroup label="工具测试">
             <option value="tool-mocker">Tool Mocker — 工具响应模拟 🔧</option>
             <option value="invalid-tool">Invalid Tool — 工具参数验证失败测试 ⚠️</option>
+            <option value="psbash">PS-Bash — POSIX 命令转译探针 🐧</option>
           </optgroup>
         </select>
       </div>
@@ -686,10 +687,11 @@
     'slow-turn':     { cls: 'badge-hang',        text: 'Slow Turn 🐢'  },
     'tool-mocker': { cls: 'badge-scenario',      text: 'Tool Mocker 🔧' },
     'invalid-tool': { cls: 'badge-error',        text: 'Invalid Tool ⚠️' },
+    'psbash':      { cls: 'badge-scenario',      text: 'PS-Bash 🐧' },
   };
 
   // modes that have no config panel and apply immediately on select
-  const INSTANT_MODES = new Set(['scenario', 'duplicate-response', 'echo', 'invalid-tool']);
+  const INSTANT_MODES = new Set(['scenario','duplicate-response', 'echo', 'invalid-tool', 'psbash']);
 
   let logs = [];
   let selectedKey = null; // 当前展开的日志 timestamp
@@ -698,7 +700,7 @@
   function onModeChange() {
     const mode = document.getElementById('modeSelect').value;
     // show/hide config panels
-    ['scenario','longturns','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','thinking-hang','flaky','slow-turn','tool-mocker'].forEach(m => {
+    ['scenario','longturns','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','thinking-hang','flaky','slow-turn','tool-mocker','psbash'].forEach(m => {
       document.getElementById(`cfg-${m}`).classList.toggle('active', m === mode);
     });
     // instant modes apply immediately

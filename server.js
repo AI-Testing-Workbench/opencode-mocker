@@ -43,6 +43,13 @@ let scenarioConfig = {
   slowFailTimes: 1,       // 前几次失败
   slowFailAfterMs: 3000,  // 失败前等待多久（让 UI 先显示忙碌）
   slowFailCode: 500,      // 返回的错误码
+  // taskrace 场景（"停止任务→恢复任务"按钮竞态复现专用）：
+  // 父会话返回 task 工具调用 → 子会话慢流挂住；停止后点"恢复任务"，
+  // 若子任务结果为空/取消，则回显 task_id 复用同一子会话（复现"子任务恢复了"）
+  subHoldMs: 120000,            // 子会话慢流总时长（默认 2 分钟，保证来得及点停止）
+  subChunkMs: 300,              // 子会话流式分片间隔
+  resumeEcho: true,             // 恢复时回显 task_id，让子会话续跑
+  parentFailAfterResume: false, // 恢复后让父会话 LLM 请求失败，复现"按钮常驻+点击看似无反应"
 };
 
 // slow-turn 请求计数（内存）：区分"首轮"和"点继续后的 resume 轮"
@@ -293,6 +300,63 @@ async function sendStream(res, content, model) {
   res.end();
 }
 
+// 判断是否为上下文压缩（summary）请求。
+// compaction 调用时传 tools: {} 且 system: []（见 session/compaction.ts），
+// 同时历史里已经存在 assistant 消息。正常对话一定带工具定义，首轮则没有
+// assistant 历史，二者都不会命中。
+function isSummaryRequest(messages, tools) {
+  if (Array.isArray(tools) && tools.length > 0) return false
+  const list = messages || []
+  const hasAssistant = list.some((m) => m.role === 'assistant')
+  if (!hasAssistant) return false
+  const lastUser = [...list].reverse().find((m) => m.role === 'user')
+  const text = typeof lastUser?.content === 'string' ? lastUser.content : ''
+  const flags = [
+    'summarize the conversation',
+    'Summarize the conversation',
+    '总结以上对话',
+    '对话摘要',
+    'conversation summary',
+    'compact',
+  ]
+  if (flags.some((flag) => text.includes(flag))) return true
+  // 无工具定义 + 已有历史 + 有 assistant 消息，基本只可能是压缩请求
+  return true
+}
+
+// 文本 + 单个 tool_call 的响应对象（非流式）
+function toolMessage(content, toolCall, model) {
+  return {
+    id: `chatcmpl-${uuidv4()}`,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model: model || 'mock-model',
+    choices: [
+      {
+        index: 0,
+        message: { role: 'assistant', content, tool_calls: [toolCall] },
+        finish_reason: 'tool_calls',
+      },
+    ],
+    usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+  };
+}
+
+// 文本 + 单个 tool_call 的流式响应（finish_reason=tool_calls）
+function sendToolStream(res, content, toolCall, model) {
+  const id = `chatcmpl-${uuidv4()}`;
+  const created = Math.floor(Date.now() / 1000);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: model || 'mock-model', choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: model || 'mock-model', choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: model || 'mock-model', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: toolCall.id, type: toolCall.type, function: toolCall.function }] }, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: model || 'mock-model', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
+
 function generateBigContent(targetBytes) {
   const sentence = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris. ';
   let result = '';
@@ -477,11 +541,12 @@ app.post('/api/scenario', (req, res) => {
           streamErrorAfterMs, toolHangPartial, loopCount,
           turns, turnDelayMs,
           failTimes, failKind, midWords, recoverReply,
-          slowTurnMs, slowStyle, slowSteps, slowStepMs, slowTool, slowReportEveryMs,
-          slowFailFirst, slowFailTimes, slowFailAfterMs, slowFailCode } = req.body;
-  const validModes = ['scenario', 'duplicate-response', 'echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun',
+           slowTurnMs, slowStyle, slowSteps, slowStepMs, slowTool, slowReportEveryMs,
+           slowFailFirst, slowFailTimes, slowFailAfterMs, slowFailCode,
+           subHoldMs, subChunkMs, resumeEcho, parentFailAfterResume } = req.body;
+  const validModes = ['scenario', 'duplicate-response','echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun',
                       'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker', 'thinking-hang', 'flaky',
-                      'slow-turn', 'longturns'];
+                      'slow-turn', 'longturns', 'taskrace', 'psbash'];
   if (!validModes.includes(mode)) {
     return res.status(400).json({ error: 'Invalid mode' });
   }
@@ -515,6 +580,17 @@ app.post('/api/scenario', (req, res) => {
   if (slowFailTimes     !== undefined) scenarioConfig.slowFailTimes     = Math.min(20, Math.max(0, parseInt(slowFailTimes)));
   if (slowFailAfterMs   !== undefined) scenarioConfig.slowFailAfterMs   = Math.min(600000, Math.max(0, parseInt(slowFailAfterMs)));
   if (slowFailCode      !== undefined) scenarioConfig.slowFailCode      = parseInt(slowFailCode);
+  if (subHoldMs         !== undefined) scenarioConfig.subHoldMs         = Math.min(600000, Math.max(5000, parseInt(subHoldMs)));
+  if (subChunkMs        !== undefined) scenarioConfig.subChunkMs        = Math.min(5000, Math.max(50, parseInt(subChunkMs)));
+  if (resumeEcho        !== undefined) scenarioConfig.resumeEcho        = !!resumeEcho;
+  if (parentFailAfterResume !== undefined) scenarioConfig.parentFailAfterResume = !!parentFailAfterResume;
+  // 切到 taskrace 时清空统计，便于驱动脚本断言
+  if (mode === 'taskrace') {
+    taskraceStats.childRuns = 0;
+    taskraceStats.parentHits = 0;
+    taskraceStats.events = [];
+    console.log(`\n🧵 taskrace 场景已重置 (subHoldMs=${scenarioConfig.subHoldMs}, resumeEcho=${scenarioConfig.resumeEcho}, parentFail=${scenarioConfig.parentFailAfterResume})`);
+  }
   // 切到 flaky、或重新设置时，重置请求计数，确保"前 N 次失败"从干净状态开始
   if (mode === 'flaky') {
     flakyHits = 0;
@@ -542,6 +618,144 @@ app.post('/api/flaky/reset', (_req, res) => {
   res.json({ ok: true, config: { ...scenarioConfig, flakyHits } });
 });
 
+// ── taskrace 事件观测端点（驱动脚本据此断言 resume 是否被吞） ──
+app.get('/api/taskrace/stats', (_req, res) => {
+  res.json({ ok: true, config: scenarioConfig, stats: taskraceStats });
+});
+
+// ── taskrace 场景状态（内存） ──
+const taskraceStats = { childRuns: 0, parentHits: 0, events: [] };
+
+function trLog(evt) {
+  taskraceStats.events.push({ at: Date.now(), evt });
+  if (taskraceStats.events.length > 200) taskraceStats.events.shift();
+  console.log(`  🧵 taskrace: ${evt}`);
+}
+
+function taskToolCall(prompt, description, taskID) {
+  const args = { description, prompt, subagent_type: 'general' };
+  if (taskID) args.task_id = taskID;
+  return {
+    id: `call_task_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    type: 'function',
+    function: { name: 'task', arguments: JSON.stringify(args) },
+  };
+}
+
+// 文本 + 一个 tool_call 的流式响应（finish_reason=tool_calls）
+function sendTaskStream(res, content, toolCall, model, stream) {
+  if (!stream) {
+    return res.json({
+      id: `chatcmpl-${uuidv4()}`,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: model || 'mock-model',
+      choices: [{ index: 0, message: { role: 'assistant', content, tool_calls: [toolCall] }, finish_reason: 'tool_calls' }],
+      usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+    });
+  }
+  const id = `chatcmpl-${uuidv4()}`;
+  const created = Math.floor(Date.now() / 1000);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: toolCall.id, type: toolCall.type, function: toolCall.function }] }, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
+  res.write('data: [DONE]\n\n');
+  return res.end();
+}
+
+// 子会话慢流：持续 subHoldMs，期间保持 busy；客户端断开（abort）即停
+async function sendChildSlowStream(res, model, stream) {
+  const { subHoldMs, subChunkMs } = scenarioConfig;
+  if (!stream) {
+    await sleep(subHoldMs);
+    return res.json(buildMessage('【子会话完成】已生成全部测试用例。', model));
+  }
+  const id = `chatcmpl-${uuidv4()}`;
+  const created = Math.floor(Date.now() / 1000);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] })}\n\n`);
+  let aborted = false;
+  res.on('close', () => { aborted = true; });
+  const deadline = Date.now() + subHoldMs;
+  let i = 0;
+  while (Date.now() < deadline && !aborted) {
+    const chunk = `【子会话运行中】第 ${++i} 段，正在生成测试用例...\n`;
+    try {
+      res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }] })}\n\n`);
+    } catch { aborted = true; break; }
+    await sleep(subChunkMs);
+  }
+  if (aborted) {
+    trLog(`child stream aborted after ${i} chunks`);
+    return;
+  }
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: '【子会话完成】已生成全部测试用例。' }, finish_reason: null }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+  res.write('data: [DONE]\n\n');
+  res.end();
+  trLog(`child finished after ${i} chunks`);
+}
+
+async function handleTaskrace(req, res) {
+  const messages = req.body?.messages ?? [];
+  const stream = !!req.body?.stream;
+  const model = req.body?.model || 'mock-model';
+  const last = messages[messages.length - 1];
+  const text = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? '');
+  const isChild = last?.role === 'user' && text.includes('MOCKSUBTASK');
+
+  if (isChild) {
+    taskraceStats.childRuns += 1;
+    trLog(`child run #${taskraceStats.childRuns} (hold ${scenarioConfig.subHoldMs}ms)`);
+    return sendChildSlowStream(res, model, stream);
+  }
+
+  taskraceStats.parentHits += 1;
+  const toolResults = messages.filter((m) => m.role === 'tool');
+  trLog(`parent request #${taskraceStats.parentHits}, toolResults=${toolResults.length}`);
+
+  // 首轮：派发一个 task 子任务
+  if (toolResults.length === 0) {
+    const call = taskToolCall(
+      'MOCKSUBTASK: 生成测试用例 CSV 第 91-120 个用例，持续输出直到全部完成',
+      '继续生成测试用例CSV'
+    );
+    return sendTaskStream(res, '好的，我启动一个子任务来生成测试用例。', call, model, stream);
+  }
+
+  // 有子任务结果：判断是否为"被停止"的空/取消结果
+  const body = typeof toolResults[toolResults.length - 1]?.content === 'string'
+    ? toolResults[toolResults.length - 1].content
+    : JSON.stringify(toolResults[toolResults.length - 1]?.content ?? '');
+  const taskID = (body.match(/task_id:\s*(\S+)/) ?? [])[1];
+  const cancelled = /cancel/i.test(body)
+    || body.includes('state="cancelled"')
+    || /<task_result>\s*<\/task_result>/.test(body)
+    || (body.includes('task_id:') && !body.includes('【子会话完成】'));
+
+  if (cancelled && taskID && scenarioConfig.resumeEcho) {
+    if (scenarioConfig.parentFailAfterResume) {
+      trLog('parent fails after resume (injected) → 按钮常驻复现');
+      return res.status(scenarioConfig.statusCode).json({
+        error: { message: 'mock taskrace parent failure', type: 'mock_error', code: scenarioConfig.statusCode },
+      });
+    }
+    trLog(`resume child via task_id=${taskID}`);
+    const call = taskToolCall('MOCKSUBTASK: 继续生成测试用例 CSV（恢复执行）', '继续生成测试用例CSV', taskID);
+    return sendTaskStream(res, '子任务被中断了，我来恢复它继续跑。', call, model, stream);
+  }
+
+  trLog('parent final reply');
+  if (stream) return sendStream(res, `任务完成：子会话共运行 ${taskraceStats.childRuns} 轮。`, model);
+  return res.json(buildMessage(`任务完成：子会话共运行 ${taskraceStats.childRuns} 轮。`, model));
+}
+
 // ── 场景拦截中间件 ──
 async function scenarioMiddleware(req, res, next) {
   const { mode, fixedReply, delayMs, sizeMB, statusCode, message,
@@ -549,8 +763,14 @@ async function scenarioMiddleware(req, res, next) {
   const isStream = !!req.body?.stream;
   const model = req.body?.model || 'mock-model';
 
-  // scenario、duplicate-response、tool-mocker、invalid-tool 和 longturns 模式：放行，走多轮对话逻辑
-  if (mode === 'scenario' || mode === 'duplicate-response' || mode === 'tool-mocker' || mode === 'invalid-tool' || mode === 'longturns') return next();
+  // scenario、tool-mocker、invalid-tool 和 longturns 模式：放行，走多轮对话逻辑
+  if (mode === 'scenario'|| mode === 'duplicate-response' || mode === 'tool-mocker' || mode === 'invalid-tool' || mode === 'longturns' || mode === 'psbash') return next();
+
+  // ── taskrace：父子会话 task 编排（"停止→恢复任务"按钮竞态复现专用） ──
+  if (mode === 'taskrace') {
+    logRequest(req.path, req.body);
+    return handleTaskrace(req, res);
+  }
 
   // 其余模式在此直接响应
   logRequest(req.path, req.body);
@@ -1289,8 +1509,18 @@ app.post('/v1/messages', scenarioMiddleware, async (req, res) => {
 
 // ── OpenAI API 格式 ──
 app.post('/v1/chat/completions', scenarioMiddleware, async (req, res) => {
-  const { messages, model, stream } = req.body;
-  
+  const { messages, model, stream, tools } = req.body;
+
+  // 上下文压缩（summary）阶段不允许任何工具调用，否则 CLI 抛
+  // "Tool call not allowed while generating summary"。所有会主动下发
+  // tool_call 的模式都必须先在这里返回纯文本，否则整轮对话会被中断。
+  if (isSummaryRequest(messages, tools)) {
+    const content = '对话已总结完毕，不要执行任何命令，继续正常对话。'
+    console.log('  📝 检测到 summary/compaction 请求，返回纯文本')
+    logRequest('/v1/chat/completions', req.body, { mockerMode: scenarioConfig.mode, phase: 'summary-guard' })
+    return stream ? sendStream(res, content, model) : res.json(buildMessage(content, model))
+  }
+
   // Tool Mocker 模式：模拟 LLM 返回工具调用
   if (scenarioConfig.mode === 'tool-mocker' && toolMockConfig.enabled) {
     const lastMsg = messages[messages.length - 1];
@@ -1570,6 +1800,56 @@ app.post('/v1/chat/completions', scenarioMiddleware, async (req, res) => {
       choices: [{ index: 0, message: { role: 'assistant', content, tool_calls: [toolCall] }, finish_reason: 'tool_calls' }],
       usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
     });
+  }
+
+  // ── psbash 探针：逐条下发 POSIX 命令，回灌后判定 ps-bash 是否报错 ──
+  if (scenarioConfig.mode === 'psbash') {
+    const probe = require('./scenarios/ps-bash-probe-scenario');
+    const sessionId = getSessionId(messages);
+    const lastMsg = messages[messages.length - 1];
+
+    // 按 tool_call_id 配对已完成的探针结果
+    const pending = new Map()
+    for (const msg of messages) {
+      if (msg.role === 'assistant' && msg.tool_calls) {
+        for (const call of msg.tool_calls) {
+          if (String(call.id || '').startsWith('call_psbash_')) {
+            pending.set(call.id, parseInt(String(call.id).replace('call_psbash_', ''), 10))
+          }
+        }
+      }
+    }
+    const done = []
+    for (const msg of messages) {
+      if (msg.role !== 'tool' || !pending.has(msg.tool_call_id)) continue
+      const index = pending.get(msg.tool_call_id)
+      const item = probe.probes[index]
+      if (item) done.push({ ...item, ...probe.judge(msg.content) })
+    }
+
+    if (lastMsg?.role === 'user') {
+      console.log(`\n🔍 psbash 探针启动: ${probe.probes.length} 条命令, session=${sessionId.substring(0, 20)}`)
+      logRequest('/v1/chat/completions', req.body, { mockerMode: 'psbash', phase: 'start', total: probe.probes.length })
+      const call = probe.toolCall(probe.probes[0], 0)
+      return stream
+        ? sendToolStream(res, `开始执行 ps-bash 探针，共 ${probe.probes.length} 条命令。`, call, model)
+        : res.json(toolMessage(`开始执行 ps-bash 探针，共 ${probe.probes.length} 条命令。`, call, model))
+    }
+
+    const next = done.length
+    if (next < probe.probes.length) {
+      const item = probe.probes[next]
+      const call = probe.toolCall(item, next)
+      const text = `[${next + 1}/${probe.probes.length}] ${item.group} / ${item.id}`
+      console.log(`  🔍 ${text}`)
+      logRequest('/v1/chat/completions', req.body, { mockerMode: 'psbash', phase: 'run', index: next, id: item.id })
+      return stream ? sendToolStream(res, text, call, model) : res.json(toolMessage(text, call, model))
+    }
+
+    const report = probe.summary(done)
+    console.log(`\n🔍 psbash 探针完成:\n${report}\n`)
+    logRequest('/v1/chat/completions', req.body, { mockerMode: 'psbash', phase: 'finish', report })
+    return stream ? sendStream(res, report, model) : res.json(buildMessage(report, model))
   }
 
   // 原有的 scenario 逻辑
