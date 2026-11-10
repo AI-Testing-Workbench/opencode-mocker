@@ -4,6 +4,7 @@ const bodyParser = require('body-parser');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const memhog = require('./scenarios/memhog-scenario');
 
 // ── 场景状态（内存） ──
 let scenarioConfig = {
@@ -25,6 +26,10 @@ let scenarioConfig = {
   // longturns 场景（webview 多轮压力测试专用）：自驱动 N 轮对话，每轮 1 条文本 + 1 次工具调用
   turns: 50,              // 总轮数（可选 50 / 100 / 150）
   turnDelayMs: 300,       // 每轮响应前等待，控制渲染节奏便于观察 webview
+  memhogTurns: 300,
+  memhogMB: 4,
+  memhogChunkKB: 64,
+  memhogDelayMs: 10,
   // flaky 场景（YOLO 错误/中断恢复专用）：前 failTimes 次 LLM 调用失败，之后恢复正常
   failTimes: 2,           // 连续失败几次后恢复（默认 2）
   failKind: 'mid',        // 'mid'=流中途断开(触发 emitted 闸门) | 'http'=HTTP 错误码 | 'empty'=正常结束但空响应 | 'truncate'=finish=length 截断
@@ -504,7 +509,8 @@ const app = express();
 const PORT = process.env.PORT || 3100;
 
 app.use(cors());
-app.use(bodyParser.json());
+// 历史消息回灌可能超过默认的 100KB；可按压测规模覆盖。
+app.use(bodyParser.json({ limit: process.env.BODY_LIMIT || '256mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // 日志目录
@@ -518,7 +524,16 @@ function logRequest(endpoint, requestBody, responseBody = null) {
     timestamp: new Date().toISOString(),
     endpoint,
     scenario: scenarioConfig.mode,
-    request: requestBody,
+    // 压测只留少量预览，避免日志和控制面板再次承载完整大文本。
+    request: scenarioConfig.mode === 'memhog' ? {
+      model: requestBody.model,
+      stream: requestBody.stream,
+      messageCount: requestBody.messages?.length || 0,
+      messages: (requestBody.messages || []).slice(-4).map(msg => ({
+        role: msg.role,
+        content: typeof msg.content === 'string' ? msg.content.slice(0, 200) : '[结构化内容已省略]',
+      })),
+    } : requestBody,
     response: responseBody,
   };
   fs.writeFileSync(filename, JSON.stringify(logData, null, 2));
@@ -536,6 +551,8 @@ app.get('/health', (_req, res) => {
 app.get('/api/scenario', (_req, res) => res.json(scenarioConfig));
 
 app.post('/api/scenario', (req, res) => {
+  const settings = memhog.configure(req.body);
+  if (settings.error) return res.status(400).json({ error: settings.error });
   const { mode, fixedReply, delayMs, sizeMB, statusCode, message,
           longrunHours, longrunIntervalMs, resetAfterBytes, hangAfterChunks,
           streamErrorAfterMs, toolHangPartial, loopCount,
@@ -546,12 +563,14 @@ app.post('/api/scenario', (req, res) => {
            subHoldMs, subChunkMs, resumeEcho, parentFailAfterResume } = req.body;
   const validModes = ['scenario', 'duplicate-response','echo', 'fixed', 'delay', 'bigdata', 'error', 'longrun',
                       'reset', 'hang', 'stream-error', 'tool-hang', 'tool-mocker', 'thinking-hang', 'flaky',
-                      'slow-turn', 'longturns', 'taskrace', 'psbash'];
+                      'slow-turn', 'longturns', 'taskrace', 'psbash', 'memhog'];
   if (!validModes.includes(mode)) {
     return res.status(400).json({ error: 'Invalid mode' });
   }
   const prevMode = scenarioConfig.mode;
   scenarioConfig.mode = mode;
+  Object.assign(scenarioConfig, settings);
+  memhog.reset();
   if (fixedReply        !== undefined) scenarioConfig.fixedReply        = String(fixedReply);
   if (delayMs           !== undefined) scenarioConfig.delayMs           = Math.max(0, parseInt(delayMs));
   if (sizeMB            !== undefined) scenarioConfig.sizeMB            = Math.min(5, Math.max(0.1, parseFloat(sizeMB)));
@@ -762,6 +781,13 @@ async function scenarioMiddleware(req, res, next) {
           longrunHours, longrunIntervalMs } = scenarioConfig;
   const isStream = !!req.body?.stream;
   const model = req.body?.model || 'mock-model';
+
+  if (mode === 'memhog') {
+    if (req.path !== '/v1/chat/completions') {
+      return res.status(400).json({ error: 'memhog 场景需要使用 OpenAI 兼容的 /v1/chat/completions 接口' });
+    }
+    return next();
+  }
 
   // scenario、tool-mocker、invalid-tool 和 longturns 模式：放行，走多轮对话逻辑
   if (mode === 'scenario'|| mode === 'duplicate-response' || mode === 'tool-mocker' || mode === 'invalid-tool' || mode === 'longturns' || mode === 'psbash') return next();
@@ -1519,6 +1545,11 @@ app.post('/v1/chat/completions', scenarioMiddleware, async (req, res) => {
     console.log('  📝 检测到 summary/compaction 请求，返回纯文本')
     logRequest('/v1/chat/completions', req.body, { mockerMode: scenarioConfig.mode, phase: 'summary-guard' })
     return stream ? sendStream(res, content, model) : res.json(buildMessage(content, model))
+  }
+
+  if (scenarioConfig.mode === 'memhog') {
+    logRequest(req.path, req.body, { mockerMode: 'memhog', phase: 'request' });
+    return memhog.handle(req, res, { ...scenarioConfig });
   }
 
   // Tool Mocker 模式：模拟 LLM 返回工具调用

@@ -29,7 +29,10 @@ async function main() {
     const res = await fetch(`${base}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'mock-model', messages, stream: false }),
+      body: JSON.stringify({
+        model: 'mock-model', messages, stream: false,
+        tools: [{ type: 'function', function: { name: 'bash', parameters: { type: 'object', properties: {} } } }],
+      }),
     });
     if (!res.ok) throw new Error(`LLM 请求失败: ${res.status} ${await res.text()}`);
     const data = await res.json();

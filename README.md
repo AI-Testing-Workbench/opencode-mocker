@@ -91,6 +91,44 @@ npm run test:longturns -- 100
 
 查看 YOLO 错误中断测试指南：[YOLO_ERROR_TEST.md](./YOLO_ERROR_TEST.md)
 
+### 大文本流式内存压测（memhog）
+
+用于向 TestAgent webview 持续施加文本和消息累积压力。每轮流式输出指定大小的随机文本，再调用一次小型 `bash echo` 自动进入下一轮；该场景不依赖工具输出绕过 CLI 的截断保护。
+
+```bash
+node server.js
+
+# 300 轮，每轮 4 MiB，64 KiB 分片，分片间隔 10ms
+curl -X POST http://localhost:3100/api/scenario \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"memhog","memhogTurns":300,"memhogMB":4,"memhogChunkKB":64,"memhogDelayMs":10}'
+```
+
+也可在控制面板选择“Memhog - 大文本流式内存压测”并应用。TestAgent 提供商须使用 OpenAI 兼容的 `http://localhost:3100/v1`，允许 `bash` 工具，并选择足够的执行步数。在新会话选择该提供商后发送一条消息，即开始自动压测。
+
+| 参数 | 默认值 | 范围 |
+| --- | --- | --- |
+| `memhogTurns` | 300 | 1–1000 轮 |
+| `memhogMB` | 4 | 每轮 0.01–32 MiB 文本 |
+| `memhogChunkKB` | 64 | 每个分片 1–256 KiB |
+| `memhogDelayMs` | 10 | 分片间隔 0–1000 ms |
+
+300 × 4 MiB 累计约 1.17 GiB 文本，这与实际 JavaScript 堆用量不同，不能据此预测固定的崩溃轮数。使用 Webview Developer Tools 的内存面板记录堆快照，并观察 renderer 进程内存；崩溃后仍需用转储或日志确认是否为内存不足（OOM）。在 TestAgent 中停止任务会关闭当前流，切换 mocker 场景不会停止正在发送的响应。
+
+每次应用配置都会重置 memhog 的会话计数。使用 `x-opencode-session` 或 `x-session-affinity` 识别会话，缺少这些请求头时按第一条用户消息区分，因此多个测试应使用不同提示。压缩请求返回简短纯文本，带会话请求头的正常请求继续原来的轮次。是否清理历史、自动压缩或提前停止仍由实际 CLI 决定。
+
+服务端请求体上限默认提升为 256 MiB，可通过 `BODY_LIMIT=512mb node server.js` 调整。若历史回灌先触发 HTTP 413、CLI 内存不足或步数限制，这不代表已复现 webview OOM。压测日志只保留最近四条消息的短预览，避免重复记录完整历史。
+
+```bash
+# 先验证模拟器协议，默认 3 轮 × 0.125 MiB，不打开 webview
+npm run test:memhog
+
+# 指定轮数、每轮大小及服务地址
+npm run test:memhog -- 3 4 http://localhost:3100
+```
+
+驱动脚本验证完整历史回灌、精确输出大小、流式与非流式响应、轮次收尾、配置校验、压缩后续跑及取消行为，结束时恢复原场景配置。应对独立测试实例执行，避免重置正在进行的压测。脚本通过仅说明模拟器协议正常。
+
 ### 🐢 headersTimeout 复现
 
 复现 `TypeError: fetch failed` / `UND_ERR_HEADERS_TIMEOUT`：`/session/:id/resume` 同步阻塞，

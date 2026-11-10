@@ -314,6 +314,7 @@
           <option value="scenario">Scenario — 多轮对话场景</option>
           <option value="duplicate-response">Duplicate Response — 连续相同内容检测 🔁</option>
           <option value="longturns">Long Turns — 长轮次对话压测 🔁（50/100/150 轮）</option>
+          <option value="memhog">Memhog - 大文本流式内存压测</option>
           <option value="echo">Echo — 回显用户输入</option>
           <option value="fixed">Fixed — 固定回复</option>
           <option value="delay">Delay — 延迟响应</option>
@@ -367,6 +368,30 @@
         <div class="hint">间隔越大渲染节奏越慢，便于观察 webview；设 0 为最快速度加压</div>
       </div>
       <button class="apply-btn" onclick="applyConfig()">应用</button>
+    </div>
+
+    <!-- 内存压测配置 -->
+    <div class="config-panel" id="cfg-memhog">
+      <div class="section-title">内存压测配置</div>
+      <div>
+        <label>总轮数</label>
+        <input type="number" id="memhogTurns" value="300" min="1" max="1000" step="1" />
+      </div>
+      <div>
+        <label>每轮文本大小 (MiB)</label>
+        <input type="number" id="memhogMB" value="4" min="0.01" max="32" step="0.01" />
+      </div>
+      <div>
+        <label>流式分片大小 (KiB)</label>
+        <input type="number" id="memhogChunkKB" value="64" min="1" max="256" step="1" />
+      </div>
+      <div>
+        <label>分片间隔 (ms)</label>
+        <input type="number" id="memhogDelayMs" value="10" min="0" max="1000" step="1" />
+      </div>
+      <div class="hint">每轮输出指定大小的文本和一次 bash echo，自驱动执行。300 轮 × 4 MiB 累计输出约 1.17 GiB；实际堆用量与渲染、压缩和缓存有关，完成轮数不代表未泄漏。</div>
+      <div class="hint">在 TestAgent 中使用 OpenAI 兼容的 /v1/chat/completions 接口并允许 bash。服务端默认接收最大 256 MiB 请求体，可用 BODY_LIMIT 覆盖；该模式日志只保留摘要。</div>
+      <button class="apply-btn" onclick="applyConfig()">应用并重置轮次</button>
     </div>
 
     <!-- fixed config -->
@@ -672,6 +697,7 @@
     scenario:      { cls: 'badge-scenario',      text: 'Scenario'      },
     'duplicate-response': { cls: 'badge-error',  text: 'Duplicate Response 🔁' },
     'longturns':   { cls: 'badge-scenario',      text: 'Long Turns 🔁' },
+    memhog:       { cls: 'badge-bigdata',       text: '内存压测' },
     echo:          { cls: 'badge-echo',          text: 'Echo'          },
     fixed:         { cls: 'badge-fixed',         text: 'Fixed'         },
     delay:         { cls: 'badge-delay',         text: 'Delay'         },
@@ -700,7 +726,7 @@
   function onModeChange() {
     const mode = document.getElementById('modeSelect').value;
     // show/hide config panels
-    ['scenario','longturns','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','thinking-hang','flaky','slow-turn','tool-mocker','psbash'].forEach(m => {
+    ['scenario','longturns','memhog','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','thinking-hang','flaky','slow-turn','tool-mocker','psbash'].forEach(m => {
       document.getElementById(`cfg-${m}`).classList.toggle('active', m === mode);
     });
     // instant modes apply immediately
@@ -730,6 +756,10 @@
     } else if (mode === 'longturns') {
       body.turns       = parseInt(document.getElementById('longturnsTurns').value) || 50;
       body.turnDelayMs = parseInt(document.getElementById('longturnsDelay').value) || 0;
+    } else if (mode === 'memhog') {
+      for (const key of ['memhogTurns', 'memhogMB', 'memhogChunkKB', 'memhogDelayMs']) {
+        body[key] = Number(document.getElementById(key).value);
+      }
     } else if (mode === 'fixed') {
       body.fixedReply = document.getElementById('fixedReply').value;
     } else if (mode === 'delay') {
@@ -1000,6 +1030,9 @@
       if (data.loopCount)            document.getElementById('scenarioLoopCount').value  = data.loopCount;
       if (data.turns)                document.getElementById('longturnsTurns').value     = data.turns;
       if (data.turnDelayMs !== undefined) document.getElementById('longturnsDelay').value = data.turnDelayMs;
+      for (const key of ['memhogTurns', 'memhogMB', 'memhogChunkKB', 'memhogDelayMs']) {
+        if (data[key] !== undefined) document.getElementById(key).value = data[key];
+      }
       if (data.fixedReply)         document.getElementById('fixedReply').value         = data.fixedReply;
       if (data.fixedReply)         document.getElementById('delayReply').value         = data.fixedReply;
       if (data.delayMs)            document.getElementById('delayMs').value            = data.delayMs;

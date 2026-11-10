@@ -11,6 +11,7 @@
     "test:stream": "node test-stream.js",
     "test:mocker": "node test-tool-mocker.js",
     "test:longturns": "node test-longturns.js",
+    "test:memhog": "node test-memhog.js",
     "test:headers-timeout": "node test-headers-timeout.js",
     "test:psbash": "node test-psbash-probe.js"
   },
