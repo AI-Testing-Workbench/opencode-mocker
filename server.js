@@ -2013,6 +2013,15 @@ app.post('/v1/chat/completions', scenarioMiddleware, async (req, res) => {
 app.post('/reset', (_req, res) => res.json({ message: 'Using message-based step counting' }));
 app.get('/sessions', (_req, res) => res.json({ message: 'Using message-based step counting' }));
 
+// 请求体超限（历史回灌膨胀触发 413）时 bodyParser 不会进入任何路由，这里补一条可见日志。
+app.use((err, _req, res, next) => {
+  if (err?.type === 'entity.too.large' || err?.status === 413 || err?.statusCode === 413) {
+    console.log(`  📦 413 请求体超过 BODY_LIMIT(${process.env.BODY_LIMIT || '256mb'})：历史回灌过大，确认模型已配置 limit.context 以触发压缩`);
+    return res.status(413).json({ error: `request body too large (BODY_LIMIT=${process.env.BODY_LIMIT || '256mb'})` });
+  }
+  next(err);
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 Mock LLM Server running on http://localhost:${PORT}`);
   console.log(`🎛️  Control Panel:  http://localhost:${PORT}/`);

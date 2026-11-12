@@ -725,9 +725,9 @@
 
   function onModeChange() {
     const mode = document.getElementById('modeSelect').value;
-    // show/hide config panels
-    ['scenario','longturns','memhog','fixed','delay','bigdata','error','longrun','reset','hang','stream-error','tool-hang','thinking-hang','flaky','slow-turn','tool-mocker','psbash'].forEach(m => {
-      document.getElementById(`cfg-${m}`).classList.toggle('active', m === mode);
+    // 仅遍历实际存在的配置面板，无配置面板的场景直接隐藏全部面板。
+    document.querySelectorAll('.config-panel').forEach(panel => {
+      panel.classList.toggle('active', panel.id === `cfg-${mode}`);
     });
     // instant modes apply immediately
     if (INSTANT_MODES.has(mode)) applyModeOnly(mode);
